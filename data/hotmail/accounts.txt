@@ -1,0 +1,2 @@
+﻿# format: email----password----client_id----refresh_token
+example3@hotmail.com----password123----client_id_here----refresh_token_here

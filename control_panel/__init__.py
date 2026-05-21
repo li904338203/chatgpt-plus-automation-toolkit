@@ -1,0 +1,1 @@
+"""Desktop control panel helpers."""

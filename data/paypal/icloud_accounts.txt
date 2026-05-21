@@ -1,0 +1,2 @@
+﻿# format: email----query_code_link
+example@icloud.com----https://example.com/query_code?token=change_me

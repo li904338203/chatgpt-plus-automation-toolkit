@@ -1,0 +1,2 @@
+﻿# format: CW-ID----card_number----MM/YYYY----CVV----phone----holder----address----address_api_url
+CW-EXAMPLE----4111111111111111----12/2030----123----3500000000----JOHN DOE----123 MAIN ST----https://address-api.example.com/get

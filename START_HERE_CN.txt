@@ -1,0 +1,12 @@
+快速开始
+1) 解压到简短英文路径，例如：D:\ChatGPTAssistantPanel
+2) 将该目录加入杀毒软件白名单
+3) 首次请以管理员身份运行一次：
+   ChatGPTAssistantPanel.exe
+
+可选命令行自检：
+ChatGPTAssistantPanel.exe --runner paypal-flow1 --count 1 --workers 1 --mail-source hotmail
+
+注意事项
+- 本交付包默认不包含 .env 文件。
+- 正式使用前请先填写你自己的密钥与配置。

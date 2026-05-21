@@ -1,0 +1,874 @@
+﻿"""PayPal 流程2：长链接 -> 绑卡支付 -> 产出待授权账号。"""
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import re
+import string
+import secrets
+import time
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from .browser import BrowserSession
+from .paypal_card_pool import CardInfo, CardPool
+from .paypal_phone_pool import PhoneInfo, PhonePool
+from .proxy_pool import ProxyPool
+from .storage import parse_mail_line
+from .utils import env_bool, extract_codes, load_env, log, resolve_path, safe_filename
+
+
+PAYPAL_OUTPUT_ROOT = resolve_path("output/paypal注册")
+LINK_POOL_FILE = PAYPAL_OUTPUT_ROOT / "长链接账号" / "account.txt"
+PENDING_AUTH_DIR = PAYPAL_OUTPUT_ROOT / "待授权账号"
+PENDING_AUTH_FILE = PENDING_AUTH_DIR / "account.txt"
+
+
+@dataclass
+class LinkItem:
+    email: str
+    code_address: str
+    link: str
+    raw_line: str
+
+
+def _display_proxy(proxy: str | None) -> str:
+    if not proxy:
+        return "无"
+    text = proxy.strip()
+    if "@" in text:
+        prefix, suffix = text.rsplit("@", 1)
+        scheme = prefix.split("://", 1)[0] + "://" if "://" in prefix else ""
+        return f"{scheme}***:***@{suffix}"
+    return text
+
+
+def _normalize_proxy(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = value.strip().lstrip("\ufeff\u200b\u2060")
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    return raw
+
+
+def _probe_proxy(proxy: str, timeout_sec: int = 10) -> tuple[bool, str]:
+    try:
+        resp = requests.get("http://example.com", proxies={"http": proxy, "https": proxy}, timeout=timeout_sec)
+        return (resp.status_code == 200), f"http={resp.status_code}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def load_link_pool() -> list[LinkItem]:
+    if not LINK_POOL_FILE.exists():
+        return []
+    items: list[LinkItem] = []
+    seen: set[str] = set()
+    for line in LINK_POOL_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+        text = line.strip().lstrip("\ufeff\u200b\u2060")
+        if not text or text.startswith("#"):
+            continue
+        parts = [p.strip() for p in text.split("----")]
+        if len(parts) < 3:
+            continue
+        email, code_address, link = parts[0], parts[1], parts[2]
+        if "@" not in email or not link.startswith(("http://", "https://")):
+            continue
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(LinkItem(email=email, code_address=code_address, link=link, raw_line=text))
+    return items
+
+
+def remove_from_link_pool(email: str) -> None:
+    if not LINK_POOL_FILE.exists():
+        return
+    lines = LINK_POOL_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+    kept: list[str] = []
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            kept.append(line)
+            continue
+        parts = [p.strip() for p in text.split("----")]
+        if parts and parts[0].lower() == email.lower():
+            continue
+        kept.append(line)
+    LINK_POOL_FILE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
+
+def save_pending_auth(email: str, code_address: str) -> None:
+    PENDING_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    if not PENDING_AUTH_FILE.exists():
+        PENDING_AUTH_FILE.write_text("", encoding="utf-8")
+    existing = PENDING_AUTH_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+    kept = [ln for ln in existing if not ln.strip().lower().startswith(email.lower() + "----")]
+    kept.append(f"{email}----{code_address}")
+    PENDING_AUTH_FILE.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
+def generate_paypal_password() -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "Lc" + "".join(secrets.choice(alphabet) for _ in range(16)) + "9!"
+
+
+def _extract_latest_code(text: str, exclude: set[str] | None = None) -> str | None:
+    found = extract_codes(text or "")
+    if not found:
+        return None
+    bad = exclude or set()
+    for code in found:
+        if code not in bad:
+            return code
+    return None
+
+
+def poll_sms_code(phone: PhoneInfo, *, timeout_sec: int = 120, interval_sec: int = 4, exclude: set[str] | None = None) -> str:
+    deadline = time.time() + max(10, timeout_sec)
+    last_err = ""
+    while time.time() < deadline:
+        try:
+            resp = requests.get(phone.api_url, timeout=15)
+            body = (resp.text or "").strip()
+            code = _extract_latest_code(body, exclude=exclude)
+            if code:
+                log(f"[SMS] 已从手机号 API 提取验证码: {code}")
+                return code
+            last_err = body[:120]
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+        time.sleep(max(1, interval_sec))
+    raise TimeoutError(f"手机号验证码超时，最后响应: {last_err}")
+
+
+async def _fill_input_if_visible(page, selectors: list[str], value: str, *, timeout_ms: int = 1500) -> bool:
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=timeout_ms):
+                await loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _click_if_visible(page, selectors: list[str], *, timeout_ms: int = 1500) -> bool:
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=timeout_ms):
+                await loc.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _fill_in_frame_if_visible(page, frame_selector: str, input_selectors: list[str], value: str, *, timeout_ms: int = 1200) -> bool:
+    try:
+        fl = page.frame_locator(frame_selector)
+    except Exception:
+        return False
+    for sel in input_selectors:
+        try:
+            loc = fl.locator(sel).first
+            if await loc.is_visible(timeout=timeout_ms):
+                await loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _select_card_payment_method_if_needed(page) -> bool:
+    try:
+        return bool(await page.evaluate(
+            """() => {
+                const text = (el) => (el?.innerText || el?.textContent || '').trim();
+                const visible = (el) => !!el && el.offsetParent !== null;
+                const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+                if (!radios.length) return true;
+                const anyChecked = radios.some(r => r.checked);
+                if (anyChecked) return true;
+
+                // Prefer card/bank-card option and avoid PayPal option.
+                const labels = Array.from(document.querySelectorAll('label, div, button, span'));
+                for (const el of labels) {
+                    if (!visible(el)) continue;
+                    const t = text(el).toLowerCase();
+                    if (!t) continue;
+                    if ((t.includes('银行卡') || t.includes('bank card') || t.includes('card')) && !t.includes('paypal')) {
+                        try { el.click(); } catch {}
+                    }
+                }
+
+                // Fallback: click first visible unchecked radio.
+                for (const r of radios) {
+                    if (!visible(r)) continue;
+                    if (!r.checked) {
+                        try { r.click(); } catch {}
+                        if (r.checked) return true;
+                        const id = r.getAttribute('id');
+                        if (id) {
+                            const lb = document.querySelector(`label[for="${id}"]`);
+                            if (lb) { try { lb.click(); } catch {} }
+                        }
+                    }
+                }
+                return Array.from(document.querySelectorAll('input[type="radio"]')).some(r => r.checked);
+            }"""
+        ))
+    except Exception:
+        return False
+
+
+async def _check_agreement_if_needed(page) -> bool:
+    try:
+        return bool(await page.evaluate(
+            """() => {
+                const visible = (el) => !!el && el.offsetParent !== null;
+                const text = (el) => (el?.innerText || el?.textContent || '').toLowerCase();
+                const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(visible);
+                if (!boxes.length) return true;
+
+                let target = null;
+                for (const box of boxes) {
+                    const container = box.closest('label, div, section, form') || box.parentElement;
+                    const t = text(container || box);
+                    if (/同意|条款|授权|agree|authorize|openai opco|subscription/i.test(t)) {
+                        target = box;
+                        break;
+                    }
+                }
+                if (!target) target = boxes[0];
+                if (!target.checked) {
+                    try { target.click(); } catch {}
+                    if (!target.checked) {
+                        const id = target.getAttribute('id');
+                        if (id) {
+                            const lb = document.querySelector(`label[for="${id}"]`);
+                            if (lb) { try { lb.click(); } catch {} }
+                        }
+                    }
+                }
+                return !!target.checked;
+            }"""
+        ))
+    except Exception:
+        return False
+
+
+async def _checkout_readiness(page) -> dict[str, bool]:
+    try:
+        return dict(await page.evaluate(
+            """() => {
+                const visible = (el) => !!el && el.offsetParent !== null;
+                const radios = Array.from(document.querySelectorAll('input[type="radio"]')).filter(visible);
+                const paymentMethodSelected = radios.length ? radios.some(r => r.checked) : true;
+                const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(visible);
+                const agreementChecked = checkboxes.length ? checkboxes.some(c => c.checked) : true;
+                const hasStripeFields =
+                    !!document.querySelector('input[name="cardnumber"], input[autocomplete="cc-number"]') ||
+                    !!document.querySelector('iframe[title*="card number" i], iframe[name*="__privateStripeFrame" i]');
+                return { payment_method_selected: paymentMethodSelected, agreement_checked: agreementChecked, has_stripe_fields: hasStripeFields };
+            }"""
+        ))
+    except Exception:
+        return {"payment_method_selected": True, "agreement_checked": True, "has_stripe_fields": True}
+
+
+async def fill_stripe(page, card: CardInfo, email: str, prefix: str = "[PayPal]") -> None:
+    await page.wait_for_timeout(1200)
+
+    await _fill_input_if_visible(page, [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[autocomplete="email"]',
+    ], email)
+
+    await _fill_input_if_visible(page, [
+        'input[name="cardnumber"]',
+        'input[autocomplete="cc-number"]',
+        'input[placeholder*="card" i]',
+        'input[aria-label*="card number" i]',
+    ], card.number)
+
+    await _fill_input_if_visible(page, [
+        'input[name="exp-date"]',
+        'input[autocomplete="cc-exp"]',
+        'input[aria-label*="expiration" i]',
+    ], f"{card.exp_month}/{card.exp_year}")
+
+    await _fill_input_if_visible(page, [
+        'input[name="cvc"]',
+        'input[autocomplete="cc-csc"]',
+        'input[aria-label*="security code" i]',
+    ], card.cvv)
+
+    await _fill_input_if_visible(page, [
+        'input[name="name"]',
+        'input[autocomplete="cc-name"]',
+        'input[placeholder*="name" i]',
+    ], card.holder_name or f"{card.first_name} {card.last_name}")
+
+    await _fill_input_if_visible(page, ['input[name="addressLine1"]', 'input[autocomplete="address-line1"]'], card.street)
+    await _fill_input_if_visible(page, ['input[name="city"]', 'input[autocomplete="address-level2"]'], card.city)
+    await _fill_input_if_visible(page, ['input[name="state"]', 'input[autocomplete="address-level1"]'], card.state)
+    await _fill_input_if_visible(page, ['input[name="postalCode"]', 'input[autocomplete="postal-code"]'], card.zip_code)
+
+    # Stripe 常见 iframe 输入框（宽松尝试，避免过早失败）
+    frame_selectors = [
+        'iframe[title*="card number" i]',
+        'iframe[name*="__privateStripeFrame" i]',
+        'iframe[src*="stripe" i]',
+    ]
+    for fsel in frame_selectors:
+        try:
+            fl = page.frame_locator(fsel)
+            await fl.locator('input[name="cardnumber"], input[autocomplete="cc-number"]').first.fill(card.number, timeout=1000)
+            await fl.locator('input[name="exp-date"], input[autocomplete="cc-exp"]').first.fill(f"{card.exp_month}/{card.exp_year}", timeout=1000)
+            await fl.locator('input[name="cvc"], input[autocomplete="cc-csc"]').first.fill(card.cvv, timeout=1000)
+            break
+        except Exception:
+            pass
+
+    submitted = await _click_if_visible(page, [
+        'button:has-text("Pay")',
+        'button:has-text("支付")',
+        'button:has-text("Subscribe")',
+        'button:has-text("订阅")',
+        'button[type="submit"]',
+    ], timeout_ms=2200)
+
+    if submitted:
+        log(f"{prefix} 已提交支付表单")
+    else:
+        log(f"{prefix} 未定位到明显支付按钮，继续观察页面")
+
+
+async def _detect_captcha(page) -> bool:
+    try:
+        result = await page.evaluate(
+            r"""() => {
+                const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+                const tokenCandidates = [
+                    document.querySelector('textarea[name="g-recaptcha-response"]')?.value || '',
+                    document.querySelector('#g-recaptcha-response')?.value || '',
+                    document.querySelector('textarea[name="h-captcha-response"]')?.value || '',
+                    document.querySelector('input[name="g-recaptcha-response"]')?.value || '',
+                    document.querySelector('input[name="h-captcha-response"]')?.value || '',
+                ];
+                const hasToken = tokenCandidates.some(v => (v || '').trim().length > 20);
+                const hasCaptchaText = /安全问题|Security Challenge|请选择包含|Select all images|crosswalk|traffic light|bus|bicycle/i.test(text);
+                const allFrames = Array.from(document.querySelectorAll('iframe[src]')).map(f => (f.getAttribute('src') || '').toLowerCase());
+                const hasChallengeFrame = allFrames.some(src => {
+                    if (!src) return false;
+                    if (src.includes('js.stripe.com') && src.includes('hcaptcha-invisible')) return false;
+                    if (src.includes('recaptcha/api2/bframe')) return true;
+                    if (src.includes('hcaptcha') && src.includes('challenge')) return true;
+                    return false;
+                }) || !!document.querySelector('iframe[title*="challenge" i]');
+                const hasPaypalChallenge = !!document.querySelector('[data-testid="captcha"], .captcha-container, #captcha, [class*="captcha" i]');
+                if (hasToken && !hasCaptchaText && !hasPaypalChallenge) return false;
+                return hasCaptchaText || hasChallengeFrame || hasPaypalChallenge;
+            }"""
+        )
+        return bool(result)
+    except Exception:
+        return False
+
+
+async def _extract_captcha_info(page) -> dict[str, Any]:
+    return await page.evaluate(
+        r"""() => {
+            const pickQuery = (src, keys) => {
+                try {
+                    const u = new URL(src, location.href);
+                    const want = new Set((keys || []).map(k => String(k).toLowerCase()));
+                    for (const [k, v] of u.searchParams.entries()) {
+                        if (want.has(String(k).toLowerCase()) && (v || '').trim()) return String(v).trim();
+                    }
+                    return '';
+                } catch { return ''; }
+            };
+            const toAbs = (src) => { try { return new URL(src, location.href).href; } catch { return location.href; } };
+            const frames = Array.from(document.querySelectorAll('iframe[src]')).map(f => f.getAttribute('src') || '').filter(Boolean);
+            const hints = frames.filter(src => /recaptcha|hcaptcha|captcha|challenge|turnstile/i.test(src)).slice(0, 8);
+            const isEnterprise = !!window.grecaptcha?.enterprise || !!document.querySelector('script[src*="recaptcha/enterprise"]');
+
+            const byDataSitekey = document.querySelector('[data-sitekey], .g-recaptcha, .h-captcha');
+            if (byDataSitekey) {
+                const sk = byDataSitekey.getAttribute('data-sitekey') || '';
+                if (sk) {
+                    return { provider: /h-captcha/i.test(byDataSitekey.className || '') ? 'hcaptcha' : 'recaptcha', sitekey: sk, solve_url: location.href, enterprise: isEnterprise, invisible: ((byDataSitekey.getAttribute('data-size') || '').toLowerCase() === 'invisible'), callback: byDataSitekey.getAttribute('data-callback') || null, reason: 'found data-sitekey element', frame_hints: hints, recaptcha_version: 'v2', action: '' };
+                }
+            }
+
+            const recFrames = frames.filter(src => /recaptcha/i.test(src));
+            if (recFrames.length) {
+                let best = recFrames[0];
+                let bestKey = '';
+                for (const src of recFrames) {
+                    const k = pickQuery(src, ['k', 'sitekey', 'siteKey', 'render']);
+                    if (k) { best = src; bestKey = k; break; }
+                }
+                const low = best.toLowerCase();
+                const action = pickQuery(best, ['action']);
+                const isV3 = /recaptcha_v3/.test(low) || (/api\.js/.test(low) && /(?:\?|&)render=/.test(low));
+                const dataS = pickQuery(best, ['s', 'data-s']);
+                return { provider: 'recaptcha', sitekey: bestKey ? decodeURIComponent(bestKey) : '', solve_url: location.href, iframe_url: toAbs(best), data_s: dataS || '', enterprise: isEnterprise, invisible: /size=invisible/i.test(best), callback: null, reason: bestKey ? 'found recaptcha iframe key param' : 'recaptcha iframe exists but no key param', frame_hints: hints, recaptcha_version: isV3 ? 'v3' : 'v2', action: action || '' };
+            }
+
+            const hFrame = frames.find(src => /hcaptcha/i.test(src) && !/js\.stripe\.com\/v3\/hcaptcha-invisible/i.test(src));
+            if (hFrame) {
+                const sk = pickQuery(hFrame, ['sitekey', 'siteKey']);
+                return { provider: 'hcaptcha', sitekey: sk ? decodeURIComponent(sk) : '', solve_url: location.href, iframe_url: toAbs(hFrame), data_s: '', enterprise: false, invisible: /invisible/i.test(hFrame), callback: null, reason: sk ? 'found hcaptcha iframe sitekey' : 'hcaptcha iframe exists but no sitekey param', frame_hints: hints, recaptcha_version: 'v2', action: '' };
+            }
+
+            return { provider: 'unknown', sitekey: '', solve_url: location.href, iframe_url: '', data_s: '', enterprise: false, invisible: false, callback: null, reason: 'no supported recaptcha/hcaptcha sitekey found', frame_hints: hints, recaptcha_version: 'v2', action: '' };
+        }"""
+    )
+
+
+async def _post_captcha_submit_hint(page) -> None:
+    await _click_if_visible(page, [
+        'button:has-text("Continue")',
+        'button:has-text("继续")',
+        'button:has-text("Verify")',
+        'button:has-text("确认")',
+        'button[type="submit"]',
+    ], timeout_ms=1200)
+
+
+async def _refresh_recaptcha_challenge(page) -> None:
+    selectors = [
+        'iframe[src*="recaptcha"]',
+        'iframe[title*="challenge" i]',
+    ]
+    for iframe_selector in selectors:
+        try:
+            btn = page.frame_locator(iframe_selector).locator("#recaptcha-reload-button, button[aria-label*='reload' i], button[aria-label*='refresh' i]").first
+            if await btn.is_visible(timeout=1000):
+                await btn.click(timeout=2000)
+                return
+        except Exception:
+            pass
+
+
+async def _solve_captcha_via_local_solver(page, env: dict[str, str], timeout_seconds: int = 180) -> bool:
+    solver_path = resolve_path("recaptcha_solver.py")
+    if not solver_path.exists():
+        log(f"[PayPal] 本地验证码脚本不存在: {solver_path}")
+        return False
+
+    try:
+        info = await _extract_captcha_info(page)
+    except Exception as exc:
+        log(f"[PayPal] 本地验证码脚本：提取 sitekey 失败，跳过本地求解: {exc}")
+        return False
+
+    if not info or not info.get("sitekey"):
+        reason = (info or {}).get("reason", "") if isinstance(info, dict) else ""
+        provider = (info or {}).get("provider", "-") if isinstance(info, dict) else "-"
+        hints = (info or {}).get("frame_hints") if isinstance(info, dict) else None
+        log(f"[PayPal] 本地验证码脚本：未检测到可用 sitekey，跳过本地求解 | provider={provider or '-'} | reason={reason or '-'}")
+        if hints:
+            log("[PayPal] CAPTCHA frame hints: " + " | ".join(str(x) for x in hints[:3]))
+        return False
+
+    api_key = (env.get("CAPTCHAAI_KEY") or "").strip() or (env.get("RECAPTCHA_SOLVER_API_KEY") or "").strip() or (env.get("PAYPAL_CAPTCHA_API_KEY") or "").strip()
+    detected_enterprise = bool(info.get("enterprise"))
+    if (env.get("PAYPAL_CAPTCHA_ENTERPRISE") or "").strip():
+        enterprise = env_bool(env.get("PAYPAL_CAPTCHA_ENTERPRISE"), default=detected_enterprise)
+    else:
+        enterprise = detected_enterprise
+
+    try:
+        spec = importlib.util.spec_from_file_location("_local_recaptcha_solver", str(solver_path))
+        if not spec or not spec.loader:
+            log("[PayPal] 本地验证码脚本加载失败：无效模块规格")
+            return False
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        log(f"[PayPal] 本地验证码脚本加载失败: {exc}")
+        return False
+
+    if not api_key:
+        api_key = str(getattr(mod, "DEFAULT_API_KEY", "") or "").strip()
+    if not api_key:
+        log("[PayPal] 未配置 CAPTCHAAI_KEY，且脚本无默认 key，回退原流程")
+        return False
+
+    sitekey = str(info.get("sitekey") or "").strip()
+    detected_invisible = bool(info.get("invisible"))
+    callback = info.get("callback")
+    page_url = str(info.get("solve_url") or page.url)
+    iframe_url = str(info.get("iframe_url") or "")
+    data_s = str(info.get("data_s") or "").strip()
+    # 优先使用顶层页面 URL，避免把 challenge 静态页 URL 传给求解器导致无解。
+    if page.url and ("paypalobjects.com" in page_url or "recaptcha" in page_url):
+        page_url = str(page.url)
+    recaptcha_version = str(info.get("recaptcha_version") or "v2").strip().lower()
+    recaptcha_action = str(info.get("action") or "").strip() or "verify"
+    v3_action = (env.get("PAYPAL_CAPTCHA_V3_ACTION") or "").strip() or recaptcha_action
+    try:
+        v3_min_score = float((env.get("PAYPAL_CAPTCHA_V3_MIN_SCORE") or "0.3").strip() or "0.3")
+    except Exception:
+        v3_min_score = 0.3
+
+    solve_v2 = getattr(mod, "solve_recaptcha_v2", None)
+    solve_v3 = getattr(mod, "solve_recaptcha_v3", None)
+    if not callable(solve_v2) and not callable(solve_v3):
+        log("[PayPal] recaptcha_solver.py 缺少 solve_recaptcha_v2/solve_recaptcha_v3")
+        return False
+
+    strategies: list[dict[str, Any]] = []
+    if recaptcha_version == "v3":
+        if callable(solve_v3):
+            strategies.append({"version": "v3"})
+        # PayPal 场景经常出现页面标记 v3 但实际需按 v2 token 注入，追加回退策略。
+        if callable(solve_v2):
+            strategies.append({"version": "v2", "invisible": True})
+            if detected_invisible is not True:
+                strategies.append({"version": "v2", "invisible": detected_invisible})
+    else:
+        if callable(solve_v2):
+            strategies.append({"version": "v2", "invisible": detected_invisible})
+            if detected_invisible is not True:
+                strategies.append({"version": "v2", "invisible": True})
+        if callable(solve_v3):
+            strategies.append({"version": "v3"})
+
+    # 去重，保持顺序。
+    dedup: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, bool]] = set()
+    for s in strategies:
+        key = (str(s.get("version") or "v2"), bool(s.get("invisible", False)))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        dedup.append(s)
+    strategies = dedup
+
+    local_retries = max(1, int((env.get("PAYPAL_CAPTCHA_LOCAL_RETRIES") or "3").strip() or "3"))
+    retry_delay_sec = max(1, int((env.get("PAYPAL_CAPTCHA_LOCAL_RETRY_DELAY") or "5").strip() or "5"))
+    token = ""
+    strategy_idx = 0
+    attempt = 0
+    while attempt < local_retries and strategy_idx < len(strategies):
+        attempt += 1
+        strategy = strategies[strategy_idx]
+        current_ver = str(strategy.get("version") or "v2")
+        current_invisible = bool(strategy.get("invisible", False))
+        log(
+            f"[PayPal] 启动本地 recaptcha_solver.py 自动求解... ({attempt}/{local_retries}) "
+            f"[mode={current_ver}{'/invisible' if current_invisible else ''}]"
+        )
+        if attempt == 1:
+            log(
+                f"[PayPal] 本地求解参数: provider={str(info.get('provider') or '-')} "
+                f"enterprise={enterprise} "
+                f"sitekey={sitekey[:18]}... pageurl={page_url[:120]}"
+            )
+            if iframe_url:
+                log(f"[PayPal] CAPTCHA iframe: {iframe_url[:140]}")
+            if data_s:
+                log("[PayPal] CAPTCHA data-s detected and enabled")
+        try:
+            if current_ver == "v3":
+                token = await asyncio.to_thread(solve_v3, api_key, sitekey, page_url, v3_action, v3_min_score, enterprise, timeout_seconds)
+            else:
+                token = await asyncio.to_thread(solve_v2, api_key, sitekey, page_url, current_invisible, enterprise, timeout_seconds, 20, 5, data_s)
+        except Exception as exc:
+            msg = str(exc).upper()
+            if "CAPTCHA_UNSOLVABLE" in msg or "ERROR_CAPTCHA_UNSOLVABLE" in msg:
+                if strategy_idx + 1 < len(strategies):
+                    strategy_idx += 1
+                    log(f"[PayPal] 本地求解无解，自动切换策略 -> {strategies[strategy_idx].get('version')}")
+                    await page.wait_for_timeout(1000)
+                    continue
+                if attempt < local_retries:
+                    log(f"[PayPal] 本地求解返回无解，自动重试下一题 ({attempt}/{local_retries})")
+                    await _refresh_recaptcha_challenge(page)
+                    await page.wait_for_timeout(retry_delay_sec * 1000)
+                    continue
+            log(f"[PayPal] 本地验证码脚本求解失败: {exc}")
+            return False
+
+        if token:
+            break
+
+        if strategy_idx + 1 < len(strategies):
+            strategy_idx += 1
+            log(f"[PayPal] 本地求解返回空 token，自动切换策略 -> {strategies[strategy_idx].get('version')}")
+            await page.wait_for_timeout(1000)
+            continue
+
+        if attempt < local_retries:
+            log(f"[PayPal] 本地验证码脚本返回空 token，准备重试 ({attempt}/{local_retries})")
+            await _refresh_recaptcha_challenge(page)
+            await page.wait_for_timeout(retry_delay_sec * 1000)
+
+    if not token:
+        log("[PayPal] 本地验证码脚本多次重试后仍未拿到 token")
+        return False
+
+    inject_js = getattr(mod, "INJECT_TOKEN_JS", None)
+    if not isinstance(inject_js, str) or "g-recaptcha-response" not in inject_js:
+        inject_js = """({ token, callback }) => {
+            let ta = document.getElementById('g-recaptcha-response');
+            if (!ta) {
+                ta = document.createElement('textarea');
+                ta.id = 'g-recaptcha-response';
+                ta.name = 'g-recaptcha-response';
+                ta.style.display = 'none';
+                document.body.appendChild(ta);
+            }
+            ta.style.display = 'block';
+            ta.value = token;
+            ta.innerHTML = token;
+            if (callback && typeof window[callback] === 'function') {
+                try { window[callback](token); } catch (e) {}
+            }
+        }"""
+
+    try:
+        await page.evaluate(inject_js, {"token": token, "callback": callback})
+        await page.wait_for_timeout(3000)
+        await _post_captcha_submit_hint(page)
+        await page.wait_for_timeout(2000)
+    except Exception as exc:
+        log(f"[PayPal] 本地验证码 token 注入失败: {exc}")
+        return False
+
+    if await _detect_captcha(page):
+        log("[PayPal] 本地验证码脚本已注入 token，但验证码仍存在，回退原流程")
+        return False
+
+    return True
+
+
+async def _wait_for_payment_success(page, timeout_sec: int = 120) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            url = page.url.lower()
+            if any(key in url for key in ["success", "complete", "thank", "subscription", "confirmation"]):
+                return True
+            text = (await page.locator("body").inner_text(timeout=1500)).lower()
+            if any(k in text for k in [
+                "payment complete",
+                "thanks for",
+                "subscription active",
+                "订阅成功",
+                "支付成功",
+                "授权成功",
+            ]):
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+    return False
+
+
+async def _handle_phone_verify_if_needed(page, phone: PhoneInfo, env: dict[str, str]) -> None:
+    need_phone = False
+    try:
+        need_phone = await page.evaluate(
+            """() => {
+                const body = (document.body?.innerText || '').toLowerCase();
+                return /code|verification|sms|phone|短信|验证码/.test(body) &&
+                    !!document.querySelector('input[name*="code" i], input[autocomplete*="one-time" i], input[inputmode="numeric"], input[aria-label*="code" i]');
+            }"""
+        )
+    except Exception:
+        need_phone = False
+
+    if not need_phone:
+        return
+
+    log("[PayPal] 检测到手机号验证码输入，开始抓取短信验证码")
+    max_attempts = max(1, int((env.get("PAYPAL_SMS_MAX_ATTEMPTS") or "30").strip() or "30"))
+    interval = max(2, int((env.get("PAYPAL_SMS_POLL_INTERVAL") or "4").strip() or "4"))
+    code = await asyncio.to_thread(poll_sms_code, phone, timeout_sec=max_attempts * interval, interval_sec=interval)
+
+    for sel in [
+        'input[name*="code" i]',
+        'input[autocomplete*="one-time" i]',
+        'input[inputmode="numeric"]',
+        'input[aria-label*="code" i]',
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=1500):
+                await loc.fill(code, timeout=1500)
+                break
+        except Exception:
+            pass
+
+    await _click_if_visible(page, [
+        'button:has-text("Continue")',
+        'button:has-text("Verify")',
+        'button:has-text("确认")',
+        'button[type="submit"]',
+    ], timeout_ms=1800)
+
+
+async def _run_one(entry: LinkItem, card: CardInfo, phone: PhoneInfo, cfg: dict[str, Any], env: dict[str, str], worker_id: int, proxy: str | None) -> bool:
+    prefix = f"[paypal-pay-{worker_id:02d}][{entry.email}]"
+    browser_cfg = cfg.get("browser", {})
+    profile_dir = resolve_path("profiles") / f"paypal_pay_{safe_filename(entry.email)}"
+
+    session = BrowserSession(
+        profile_dir=profile_dir,
+        headless=bool(browser_cfg.get("headless", False)),
+        slow_mo=int(browser_cfg.get("slow_mo", 80)),
+        timeout_ms=int(browser_cfg.get("timeout_ms", 60000)),
+        proxy=proxy,
+        fingerprint_seed=entry.email,
+    )
+
+    page = None
+    try:
+        log(f"{prefix} start pay")
+        log(f"{prefix} using proxy: {_display_proxy(proxy)}")
+
+        await session.__aenter__()
+        page = await session.current_page()
+        await page.goto(entry.link, wait_until="domcontentloaded", timeout=90_000)
+        await page.wait_for_timeout(2500)
+
+        await fill_stripe(page, card, entry.email, prefix=prefix)
+        await page.wait_for_timeout(1500)
+
+        if await _detect_captcha(page):
+            log("[PayPal] 🚧 检测到人机验证码（CAPTCHA），需要处理...")
+            solved = await _solve_captcha_via_local_solver(page, env, timeout_seconds=180)
+            if not solved:
+                log("[PayPal] 🚧 请手动完成验证码！等待最多 180 秒...")
+                await page.wait_for_timeout(180_000)
+                log("[PayPal] 完成验证码后脚本会自动继续")
+
+        await _handle_phone_verify_if_needed(page, phone, env)
+
+        # 再次尝试提交
+        await _click_if_visible(page, [
+            'button:has-text("Pay")',
+            'button:has-text("Subscribe")',
+            'button:has-text("Continue")',
+            'button:has-text("确认")',
+            'button[type="submit"]',
+        ], timeout_ms=1600)
+
+        ok = await _wait_for_payment_success(page, timeout_sec=120)
+        if not ok:
+            body = ""
+            try:
+                body = (await page.locator("body").inner_text(timeout=1500))[:800]
+            except Exception:
+                pass
+            raise RuntimeError(f"支付未在预期时间内完成，URL={page.url} body={body!r}")
+
+        save_pending_auth(entry.email, entry.code_address)
+        remove_from_link_pool(entry.email)
+        log(f"{prefix} payment success -> pending auth saved")
+        return True
+
+    except Exception as exc:  # noqa: BLE001
+        if page is not None:
+            try:
+                body = await page.evaluate("() => (document.body?.innerText || '').slice(0, 1200)")
+                log(f"{prefix} debug page: url={page.url} body={body!r}")
+            except Exception:
+                pass
+        log(f"{prefix} failed: {exc}")
+        traceback.print_exc()
+        return False
+    finally:
+        await session.__aexit__(None, None, None)
+
+
+async def run_paypal_pay(cfg: dict[str, Any], count: int = 1, workers: int = 1) -> int:
+    env = load_env(".env")
+
+    links = load_link_pool()
+    if not links:
+        log("PayPal flow2: no pending links")
+        return 0
+
+    target = min(max(1, count), len(links))
+    links = links[:target]
+
+    cards_file = env.get("PAYPAL_CARDS_FILE") or "data/paypal/cards.txt"
+    phones_file = env.get("PAYPAL_PHONES_FILE") or "data/paypal/phones.txt"
+
+    card_pool = CardPool(cards_file)
+    phone_pool = PhonePool(phones_file, max_uses=int(env.get("PAYPAL_PHONE_MAX_USES") or 5))
+
+    if card_pool.count() <= 0:
+        log("PayPal flow2: no cards in pool")
+        return 0
+    if phone_pool.count() <= 0:
+        log("PayPal flow2: no phones in pool")
+        return 0
+
+    use_proxy = env_bool(env.get("PAYPAL_USE_PROXY"), default=False)
+    proxy_pool: ProxyPool | None = None
+    if use_proxy:
+        proxy_file = env.get("PAYPAL_PROXY_FILE") or "data/proxies/proxies_us.txt"
+        proxy_pool = ProxyPool(proxy_file)
+        log(f"PayPal flow2: proxy enabled, pool size={proxy_pool.count()}")
+        if proxy_pool.count() <= 0:
+            log("PayPal flow2: proxy pool empty, fallback to direct")
+            proxy_pool = None
+
+    success = 0
+    lock = asyncio.Lock()
+    sem = asyncio.Semaphore(max(1, min(workers, target)))
+
+    async def worker(idx: int, entry: LinkItem) -> None:
+        nonlocal success
+        async with sem:
+            card = card_pool.take_one()
+            if not card:
+                log(f"[paypal-pay-{idx:02d}] no card available")
+                return
+
+            phone = phone_pool.acquire(idx)
+            if not phone:
+                log(f"[paypal-pay-{idx:02d}] no phone available")
+                return
+
+            proxy = _normalize_proxy(proxy_pool.pick(idx) if proxy_pool else None)
+            if proxy and idx == 1:
+                ok, msg = await asyncio.to_thread(_probe_proxy, proxy)
+                if ok:
+                    log("PayPal flow2: proxy precheck passed")
+                else:
+                    log(f"PayPal flow2: proxy precheck failed: {msg}")
+
+            ok = await _run_one(entry, card, phone, cfg, env, idx, proxy)
+            if ok:
+                card_pool.remove(card)
+                phone_pool.release(phone.number, success=True)
+                async with lock:
+                    success += 1
+            else:
+                phone_pool.release(phone.number, success=False)
+
+    tasks = [asyncio.create_task(worker(i + 1, links[i])) for i in range(len(links))]
+    await asyncio.gather(*tasks)
+
+    log(f"PayPal flow2 done: success={success}/{len(links)}")
+    return success

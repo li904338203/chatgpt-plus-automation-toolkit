@@ -1,0 +1,2 @@
+﻿# format: phone----sms_api_url
+3500000000----https://sms-provider.example/api/get_sms?key=change_me

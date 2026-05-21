@@ -1,0 +1,59 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+config.local.yaml
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime output and logs
+output/
+输出/
+profiles/
+账号输入/
+浏览器插件版 可用于替换流程一/profiles/
+浏览器插件版 可用于替换流程一/worker_profiles/
+浏览器插件版 可用于替换流程一/output/
+*.log
+*.tmp
+
+# Bundled/generated toolchains
+tools/android-build/
+tools/notification-bridge/.gradle-local/
+tools/notification-bridge/.gradle/
+tools/notification-bridge/app/build/
+
+# Local shortcuts and OS/editor files
+*.lnk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local runtime config
+config.yaml
+
+# Sensitive pool/runtime data under data/
+data/**/mail_pool.txt
+data/**/accounts.private.txt
+data/**/phones.private.txt
+data/**/cards.private.txt
+data/**/tokens*.json
+data/**/session*.json*
+data/**/account-rt*.txt
+data/paypal/card_codes_used.txt
+data/paypal/card_codes_failed.txt
