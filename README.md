@@ -70,7 +70,7 @@ cp config.example.yaml config.yaml
 - 配置清单：`.env.example`、`config.example.yaml`
 - 安全策略：`SECURITY.md`
 - 贡献指南：`CONTRIBUTING.md`
-- 可执行文件：`release/ChatGPTAssistantPanel.exe`
+- 可执行文件：`release/ChatGPTAssistantPanel-portable-lite.zip`
 
 ## 交流群
 
