@@ -27,6 +27,7 @@ ICLOUD_THEFINDNET_BASE_URL = "https://icloud.thefindnet.xyz"
 APPLEEMAIL_MAILBOXES = ("INBOX", "Junk")
 HOTMAIL_IMAP_MAILBOXES = ("INBOX", "Junk", "Junk Email")
 MAIL_TIME_SKEW = timedelta(minutes=10)
+HOTMAIL_CODE_TIME_SKEW = timedelta(seconds=45)
 HOTMAIL_APPLEEMAIL_HTTP_TIMEOUT_SEC = 8
 HOTMAIL_APPLEEMAIL_ATTEMPT_TIMEOUT_SEC = 10
 HOTMAIL_FALLBACK_INTERVAL_SEC = 60
@@ -54,6 +55,21 @@ EXTERNAL_MAIL_FETCH_MODE_ENV = "MAIL_FETCH_SOURCE"
 EXTERNAL_MAIL_FETCH_MODE_IMAP163 = {"desktop_imap163", "external_imap163", "imap163"}
 EXTERNAL_IMAP163_DIR_ENV = "EXTERNAL_IMAP163_DIR"
 DEFAULT_EXTERNAL_IMAP163_DIR = ""
+
+
+def is_appleemail_nonrecoverable_error(message: str) -> bool:
+    text = str(message or "")
+    lowered = text.lower()
+    markers = (
+        "not supported",
+        "permission",
+        "unauthorized",
+        "forbidden",
+        "only for nineemail",
+        "接口仅限九邮微软邮箱使用",
+        "九邮微软邮箱",
+    )
+    return any(marker in lowered or marker in text for marker in markers)
 
 
 class MailProvider:
@@ -324,96 +340,35 @@ def parse_icloud_time(item: dict[str, Any]) -> datetime | None:
 async def fetch_hotmail_graph_code(account: MailAccount, since: datetime, exclude: set[str]) -> str | None:
     if not account.client_id or not account.refresh_token:
         raise RuntimeError("Hotmail Graph 需要 email----password----client_id----refresh_token 格式")
-    email_key = account.email.lower()
-    round_started_at = datetime.now(timezone.utc)
-    apple_force_fallback = False
-    if email_key not in _HOTMAIL_APPLEEMAIL_MISS_COUNT:
-        _HOTMAIL_APPLEEMAIL_MISS_COUNT[email_key] = 0
-    # PayPal 流程一优先策略：优先小苹果 API，避免每轮都卡在 IMAP/Graph 回退
-    # 仅当明确判定小苹果不可用（权限/不支持）时，才进入 IMAP/Graph 后备链路。
-    hard_apple_first = HOTMAIL_APPLE_FIRST_HARD_MODE
-    if email_key not in _APPLEEMAIL_UNAVAILABLE:
+    if account.email.lower() not in _APPLEEMAIL_UNAVAILABLE:
         try:
-            code = await asyncio.wait_for(
-                fetch_appleemail_code(account, since, exclude),
-                timeout=HOTMAIL_APPLEEMAIL_ATTEMPT_TIMEOUT_SEC,
-            )
+            code = await fetch_appleemail_code(account, since, exclude)
             if code:
-                _HOTMAIL_APPLEEMAIL_MISS_COUNT[email_key] = 0
-                elapsed_ms = int((datetime.now(timezone.utc) - round_started_at).total_seconds() * 1000)
-                log(f"Hotmail 抓码成功（AppleEmail），耗时 {elapsed_ms}ms")
                 return code
-            _HOTMAIL_APPLEEMAIL_MISS_COUNT[email_key] += 1
-        except asyncio.TimeoutError:
-            _HOTMAIL_APPLEEMAIL_MISS_COUNT[email_key] += 1
-            log(f"AppleEmail API 超时（>{HOTMAIL_APPLEEMAIL_ATTEMPT_TIMEOUT_SEC}s），记为一次未命中")
-            if hard_apple_first:
-                return None
-            apple_force_fallback = True
         except Exception as exc:  # noqa: BLE001
-            if "not supported" in str(exc).lower() or "permission" in str(exc).lower():
+            if "不支持或无权限" in str(exc) or is_appleemail_nonrecoverable_error(str(exc)):
                 _APPLEEMAIL_UNAVAILABLE.add(account.email.lower())
-                apple_force_fallback = True
-            else:
-                _HOTMAIL_APPLEEMAIL_MISS_COUNT[email_key] += 1
-                if hard_apple_first:
-                    log(f"AppleEmail API fetch failed, keep AppleEmail-first (skip IMAP/Graph this round): {exc}")
-                    return None
-                apple_force_fallback = True
-            log(f"AppleEmail API fetch failed, fallback to Outlook IMAP: {exc}")
-    if hard_apple_first and email_key not in _APPLEEMAIL_UNAVAILABLE:
-        misses = _HOTMAIL_APPLEEMAIL_MISS_COUNT.get(email_key, 0)
-        log(f"AppleEmail 优先模式：本轮仅尝试小苹果抓码（连续未命中 {misses} 次）")
-        return None
-    misses = _HOTMAIL_APPLEEMAIL_MISS_COUNT.get(email_key, 0)
-    should_try_fallback = apple_force_fallback or email_key in _APPLEEMAIL_UNAVAILABLE or misses >= HOTMAIL_FALLBACK_MISS_THRESHOLD
-    if not should_try_fallback:
-        log(f"AppleEmail 连续未命中 {misses} 次，暂不触发 IMAP/Graph")
-        return None
-    now = datetime.now(timezone.utc)
-    last_fallback_at = _HOTMAIL_FALLBACK_LAST_RUN.get(email_key)
-    if last_fallback_at:
-        elapsed = (now - last_fallback_at).total_seconds()
-        if elapsed < HOTMAIL_FALLBACK_INTERVAL_SEC:
-            remain = int(HOTMAIL_FALLBACK_INTERVAL_SEC - elapsed)
-            log(f"Hotmail 后备来源冷却中，{remain}s 后再试 IMAP/Graph")
-            return None
-    _HOTMAIL_FALLBACK_LAST_RUN[email_key] = now
+            log(f"AppleEmail API 取码失败，继续尝试 Outlook IMAP: {exc}")
     imap_error = ""
     try:
-        code = await asyncio.wait_for(
-            fetch_hotmail_imap_code(account, since, exclude),
-            timeout=HOTMAIL_IMAP_ATTEMPT_TIMEOUT_SEC,
-        )
+        code = await fetch_hotmail_imap_code(account, since, exclude)
         if code:
-            elapsed_ms = int((datetime.now(timezone.utc) - round_started_at).total_seconds() * 1000)
-            log(f"Hotmail 抓码成功（Outlook IMAP），耗时 {elapsed_ms}ms")
             return code
-    except asyncio.TimeoutError:
-        imap_error = "imap_timeout"
-        log(f"Outlook IMAP 取码超时（>{HOTMAIL_IMAP_ATTEMPT_TIMEOUT_SEC}s），回退 Hotmail Graph")
     except Exception as exc:  # noqa: BLE001
         imap_error = str(exc)
         log(f"Outlook IMAP 取码失败，回退 Hotmail Graph: {exc}")
     try:
-        token = await asyncio.wait_for(
-            refresh_graph_access_token(account.client_id, account.refresh_token),
-            timeout=HOTMAIL_GRAPH_ATTEMPT_TIMEOUT_SEC,
-        )
-        messages = await asyncio.wait_for(
-            list_recent_messages(token),
-            timeout=HOTMAIL_GRAPH_ATTEMPT_TIMEOUT_SEC,
-        )
+        token = await refresh_graph_access_token(account.client_id, account.refresh_token)
     except Exception as exc:  # noqa: BLE001
         graph_error = str(exc)
         log(f"Hotmail Graph 刷新失败: {graph_error}")
         if "invalid_grant" in imap_error and "invalid_grant" in graph_error:
-            raise RuntimeError("hotmail_oauth_invalid_grant: both IMAP and Graph OAuth failed")
+            raise RuntimeError("hotmail_oauth_invalid_grant: IMAP 和 Graph OAuth 均失效")
         return None
-    since_floor = since - MAIL_TIME_SKEW
+    messages = await list_recent_messages(token)
     for item in messages:
         received = parse_graph_time(item.get("receivedDateTime"))
-        if received and received < since_floor:
+        if received and received < since:
             continue
         sender = (((item.get("from") or {}).get("emailAddress") or {}).get("address") or "").lower()
         subject = item.get("subject") or ""
@@ -424,11 +379,7 @@ async def fetch_hotmail_graph_code(account: MailAccount, since: datetime, exclud
             continue
         code = extract_code(text)
         if code and code not in exclude:
-            elapsed_ms = int((datetime.now(timezone.utc) - round_started_at).total_seconds() * 1000)
-            log(f"Hotmail 抓码成功（Graph），耗时 {elapsed_ms}ms")
             return code
-        if code and code in exclude:
-            log(f"Hotmail Graph 命中验证码但在排除列表中，等待更新: {code}")
     return None
 
 
@@ -613,10 +564,9 @@ async def get_imap_access_token(client_id: str, refresh_token: str) -> str:
 
 def fetch_hotmail_imap_code_sync(email: str, access_token: str, since: datetime, exclude: set[str]) -> str | None:
     since_utc = since.astimezone(timezone.utc) if since.tzinfo else since.replace(tzinfo=timezone.utc)
-    since_floor = since_utc - MAIL_TIME_SKEW
     date_filter = since_utc.strftime("%d-%b-%Y")
     auth_string = f"user={email}\x01auth=Bearer {access_token}\x01\x01"
-    with imaplib.IMAP4_SSL(OUTLOOK_IMAP_HOST, 993, timeout=HOTMAIL_IMAP_ATTEMPT_TIMEOUT_SEC) as conn:
+    with imaplib.IMAP4_SSL(OUTLOOK_IMAP_HOST, 993) as conn:
         conn.authenticate("XOAUTH2", lambda _response: auth_string.encode("utf-8"))
         for mailbox in HOTMAIL_IMAP_MAILBOXES:
             try:
@@ -646,7 +596,7 @@ def fetch_hotmail_imap_code_sync(email: str, access_token: str, since: datetime,
                             internal_date = parsedate_to_datetime(match.group(1).decode("ascii", errors="ignore"))
                         except Exception:
                             internal_date = None
-                if internal_date and internal_date < since_floor:
+                if internal_date and internal_date < since_utc:
                     continue
                 text = decode_imap_message(raw_message)
                 if not looks_like_openai_mail(text):
@@ -692,6 +642,33 @@ def decode_imap_message(raw_message: bytes) -> str:
             payload = message.get_payload(decode=True) or b""
             parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="ignore"))
     return "\n".join(parts)
+
+
+def parse_imap_received_time(raw_message: bytes, fallback: datetime | None) -> datetime | None:
+    # Junk 邮箱中的 INTERNALDATE 可能是“移动到垃圾箱时间”，优先使用邮件头 Date 判断真实发送时间。
+    from email import policy
+    from email.parser import BytesParser
+
+    if not raw_message:
+        if fallback and not fallback.tzinfo:
+            return fallback.replace(tzinfo=timezone.utc)
+        return fallback
+    try:
+        message = BytesParser(policy=policy.default).parsebytes(raw_message)
+    except Exception:
+        if fallback and not fallback.tzinfo:
+            return fallback.replace(tzinfo=timezone.utc)
+        return fallback
+    date_header = str(message.get("date") or "").strip()
+    if date_header:
+        try:
+            parsed = parsedate_to_datetime(date_header)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    if fallback and not fallback.tzinfo:
+        return fallback.replace(tzinfo=timezone.utc)
+    return fallback
 
 
 async def refresh_graph_access_token(client_id: str, refresh_token: str) -> str:

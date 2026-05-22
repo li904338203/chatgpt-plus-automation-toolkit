@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import random
@@ -16,11 +16,11 @@ from modules.terminal_theme import GRAY, paint, style_timed_log
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 OUTPUT_FILES = {
-    "flow1_success": "output/gopay注册plus/流程1_注册成功长链接.txt",
-    "flow1_failed": "output/gopay注册plus/流程1_注册失败账号.txt",
-    "flow1_in_progress": "output/gopay注册plus/流程1_注册处理中.txt",
-    "flow2_paid_success": "output/gopay注册plus/流程2_支付成功待授权.txt",
-    "flow2_nonzero_billing": "output/gopay注册plus/流程2_非0元账单跳过.txt",
+    "flow1_success": "output/gopay娉ㄥ唽plus/娴佺▼1_娉ㄥ唽鎴愬姛闀块摼鎺?txt",
+    "flow1_failed": "output/gopay娉ㄥ唽plus/娴佺▼1_娉ㄥ唽澶辫触璐﹀彿.txt",
+    "flow1_in_progress": "output/gopay娉ㄥ唽plus/娴佺▼1_娉ㄥ唽澶勭悊涓?txt",
+    "flow2_paid_success": "output/gopay娉ㄥ唽plus/娴佺▼2_鏀粯鎴愬姛寰呮巿鏉?txt",
+    "flow2_nonzero_billing": "output/gopay娉ㄥ唽plus/娴佺▼2_闈?鍏冭处鍗曡烦杩?txt",
 }
 
 LEGACY_OUTPUT_FILES = {
@@ -53,11 +53,11 @@ def migrate_output_file(new_path: str | Path, legacy_path: str | Path | None = N
                     combined += "\n"
                 combined += legacy_text.strip() + "\n"
                 target.write_text(combined, encoding="utf-8")
-            backup_dir = legacy.parent / "旧文件备份"
+            backup_dir = legacy.parent / "legacy_backup"
             backup_dir.mkdir(parents=True, exist_ok=True)
-            backup = backup_dir / f"旧_{legacy.name}"
+            backup = backup_dir / f"old_{legacy.name}"
             if backup.exists():
-                backup = backup_dir / f"旧_{legacy.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{legacy.suffix}"
+                backup = backup_dir / f"old_{legacy.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{legacy.suffix}"
             legacy.rename(backup)
     if not target.exists():
         target.write_text("", encoding="utf-8")
@@ -96,7 +96,7 @@ def load_env(path: str | Path = ".env") -> dict[str, str]:
 def env_bool(value: str | None, default: bool = False) -> bool:
     if value is None or value == "":
         return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on", "启用", "是"}
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def now_utc() -> datetime:
@@ -115,18 +115,27 @@ def extract_code(text: str) -> str | None:
 
 
 def extract_codes(text: str) -> list[str]:
+    # Email HTML often contains CSS colors like #202123 / #353740.
+    # Remove style/script/html/color tokens before OTP extraction.
+    normalized = text or ""
+    normalized = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", normalized)
+    normalized = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", normalized)
+    normalized = re.sub(r"(?is)<!--.*?-->", " ", normalized)
+    normalized = re.sub(r"(?is)<[^>]+>", " ", normalized)
+    normalized = re.sub(r"#[0-9a-fA-F]{6}\b", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+
     codes: list[str] = []
     for pattern in [
-        r"code[^0-9]{0,30}(\d{6})",
-        r"验证码[^0-9]{0,30}(\d{6})",
+        r"(?:verification\s*code|one[-\s]*time\s*code|login\s*code|code)[^0-9]{0,30}(\d{6})",
+        r"(?:验证码|临时验证码|登录代码|安全代码|验证代码)[^0-9]{0,30}(\d{6})",
         r"(?<!\d)(\d{6})(?!\d)",
     ]:
-        for found in re.findall(pattern, text, flags=re.I):
+        for found in re.findall(pattern, normalized, flags=re.I):
             code = found if isinstance(found, str) else found[0]
             if code not in codes:
                 codes.append(code)
     return codes
-
 
 def random_profile(age_min: int, age_max: int) -> tuple[str, str]:
     first_names = [
@@ -148,8 +157,9 @@ def random_profile(age_min: int, age_max: int) -> tuple[str, str]:
 
 async def pause_for_user(reason: str) -> None:
     log(reason)
-    await asyncio.to_thread(input, "处理完浏览器页面后输入 next 继续：")
+    await asyncio.to_thread(input, "Handle browser manually, then input next to continue: ")
 
 
 def safe_filename(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.@-]+", "_", value)
+
