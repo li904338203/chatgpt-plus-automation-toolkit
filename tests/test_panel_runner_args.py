@@ -23,7 +23,9 @@ def test_flow_key_for_actions() -> None:
     assert panel_runner.flow_key_for_action("paypal-flow1") == "flow1"
     assert panel_runner.flow_key_for_action("paypal-auto") == "flow1"
     assert panel_runner.flow_key_for_action("paypal-flow2-nocard") == "flow1"
+    assert panel_runner.flow_key_for_action("paypal-flow2-filler") == "flow1"
     assert panel_runner.flow_key_for_action("paypal-auto-nocard") == "flow1"
+    assert panel_runner.flow_key_for_action("paypal-auto-filler") == "flow1"
     assert panel_runner.flow_key_for_action("paypal-flow3") == "flow3"
 
 
@@ -55,9 +57,11 @@ def test_parse_all_supported_actions() -> None:
         "paypal-flow1",
         "paypal-flow2",
         "paypal-flow2-nocard",
+        "paypal-flow2-filler",
         "paypal-flow3",
         "paypal-auto",
         "paypal-auto-nocard",
+        "paypal-auto-filler",
         "check-config",
     ):
         args = panel_runner.parse_args([action])

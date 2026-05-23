@@ -212,11 +212,13 @@ class RunPage(ttk.Frame):
         ttk.Button(button_row_1, text="流程1 生成长链接", command=lambda: self.start("paypal-flow1")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程2 真实卡PayPal", command=lambda: self.start("paypal-flow2")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程2 无卡PayPal", command=lambda: self.start("paypal-flow2-nocard")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_1, text="流程2 Filler脚本", command=lambda: self.start("paypal-flow2-filler")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程3 授权落盘", command=lambda: self.start("paypal-flow3")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程3 Session快捷导出", command=lambda: self.start("paypal-flow3-session")).pack(side=LEFT, padx=4)
 
         ttk.Button(button_row_2, text="全自动 真实卡", command=lambda: self.start("paypal-auto")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_2, text="全自动 无卡", command=lambda: self.start("paypal-auto-nocard")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_2, text="全自动 Filler脚本", command=lambda: self.start("paypal-auto-filler")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_2, text="全自动真实卡Session", command=lambda: self.start("paypal-auto-session")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_2, text="全自动无卡Session", command=lambda: self.start("paypal-auto-nocard-session")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_2, text="停止任务", command=self.stop).pack(side=RIGHT, padx=8)

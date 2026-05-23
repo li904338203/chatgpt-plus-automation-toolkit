@@ -37,6 +37,7 @@ install_runtime_project_root()
 
 from main import apply_env_config
 from main import configure_mail_source
+from modules.paypal_filler_bridge import run_paypal_filler_flow2
 from modules.paypal_flow import _run_paypal_authorize, _run_paypal_session_export
 from modules.paypal_pay import PAYPAL_OUTPUT_ROOT, run_paypal_pay
 from modules.paypal_register import run_paypal_register
@@ -47,10 +48,12 @@ VALID_ACTIONS = (
     "paypal-flow1",
     "paypal-flow2",
     "paypal-flow2-nocard",
+    "paypal-flow2-filler",
     "paypal-flow3",
     "paypal-flow3-session",
     "paypal-auto",
     "paypal-auto-nocard",
+    "paypal-auto-filler",
     "paypal-auto-session",
     "paypal-auto-nocard-session",
     "oauth-login",
@@ -134,8 +137,10 @@ def flow_key_for_action(action: str) -> str:
         "paypal-flow1",
         "paypal-flow2",
         "paypal-flow2-nocard",
+        "paypal-flow2-filler",
         "paypal-auto",
         "paypal-auto-nocard",
+        "paypal-auto-filler",
         "paypal-auto-session",
         "paypal-auto-nocard-session",
         "check-config",
@@ -209,6 +214,20 @@ def run_action(args: argparse.Namespace) -> int:
             return 0
         if flow in {"paypal-flow1", "paypal-flow2", "paypal-flow2-nocard"}:
             success = asyncio.run(run_with_playwright_noise_filter(_run_async_action(args, cfg)))
+        elif flow == "paypal-flow2-filler":
+            success = int(
+                run_paypal_filler_flow2(
+                    cfg,
+                    count=target,
+                    workers=workers,
+                    selected_email=args.email,
+                )
+                or 0
+            )
+            if success <= 0:
+                detail = f" for selected email {args.email}" if args.email else ""
+                print(result_event(flow, "failure", f"filler flow2 produced no pending auth accounts{detail}"), flush=True)
+                return 1
         elif flow == "paypal-flow3":
             auth_code = int(_run_paypal_authorize(count=target, workers=workers) or 0)
             if auth_code == 0:
@@ -224,7 +243,8 @@ def run_action(args: argparse.Namespace) -> int:
                 return 0
             print(result_event(flow, "failure", f"flow3 session export failed code={export_code}", path=output_root), flush=True)
             return export_code
-        elif flow in {"paypal-auto", "paypal-auto-nocard", "paypal-auto-session", "paypal-auto-nocard-session"}:
+        elif flow in {"paypal-auto", "paypal-auto-nocard", "paypal-auto-filler", "paypal-auto-session", "paypal-auto-nocard-session"}:
+            use_filler_flow2 = flow == "paypal-auto-filler"
             use_local_random_mode = flow in {"paypal-auto-nocard", "paypal-auto-nocard-session"}
             use_session_export = flow in {"paypal-auto-session", "paypal-auto-nocard-session"}
             reg_success = asyncio.run(
@@ -241,12 +261,22 @@ def run_action(args: argparse.Namespace) -> int:
                 detail = f" for selected email {args.email}" if args.email else ""
                 print(result_event(flow, "failure", f"flow1 produced no payment links{detail}"), flush=True)
                 return 1
-            pay_mode = "local_random" if use_local_random_mode else "real"
-            pay_success = asyncio.run(
-                run_with_playwright_noise_filter(
-                    run_paypal_pay(cfg, count=reg_success, workers=workers, card_source_mode=pay_mode)
+            if use_filler_flow2:
+                pay_success = int(
+                    run_paypal_filler_flow2(
+                        cfg,
+                        count=reg_success,
+                        workers=workers,
+                        selected_email=args.email,
+                    )
                 )
-            )
+            else:
+                pay_mode = "local_random" if use_local_random_mode else "real"
+                pay_success = asyncio.run(
+                    run_with_playwright_noise_filter(
+                        run_paypal_pay(cfg, count=reg_success, workers=workers, card_source_mode=pay_mode)
+                    )
+                )
             if pay_success <= 0:
                 print(result_event(flow, "failure", "flow2 produced no pending auth accounts"), flush=True)
                 return 1
