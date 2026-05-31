@@ -41,6 +41,7 @@ from modules.grizzly_sms_provider import GrizzlySMSProvider
 from modules.hero_sms_provider import HeroSMSProvider, PhoneCountry, local_phone_number
 from modules.fivesim_sms_provider import FiveSimProvider
 from modules.terminal_theme import install_print_theme
+from modules.utils import load_env
 
 
 install_print_theme()
@@ -416,6 +417,13 @@ OTP_INVALID_HINTS = (
     "验证码无效",
     "验证码错误",
     "验证码已过期",
+)
+PHONE_LINK_LIMIT_HINTS = (
+    "此电话号码已关联到可关联的最大账户",
+    "电话号码已关联到可关联的最大账户",
+    "this phone number is linked to the maximum number of accounts",
+    "linked to the maximum number of accounts",
+    "phone number has reached the maximum",
 )
 PASSWORD_INVALID_HINTS = (
     "incorrect email address or password",
@@ -1532,6 +1540,26 @@ def fetch_latest_email_code(mail_url: str, email: str = "", timeout: int = 12, s
     if not mail_url:
         return ""
     mail_url = str(mail_url or "").strip()
+    if mail_url.lower() == "imap163":
+        try:
+            from modules.mail_provider import wait_code_with_external_imap163
+
+            env = load_env(".env")
+            code = run_async_blocking(
+                wait_code_with_external_imap163(
+                    email=email,
+                    timeout_sec=max(30, int(timeout or 90)),
+                    exclude=set(),
+                    env=env,
+                )
+            )
+            code = (code or "").strip()
+            if code:
+                print(f"[mail] 已从 163/imap163 抓码源获取验证码: {code}")
+            return code
+        except Exception as exc:
+            print(f"[mail] 163/imap163 抓码失败: {exc}")
+            return ""
     if email and is_moemail_email(email):
         return fetch_moemail_email_code(email, timeout=timeout)
     if email_domain(email) == "icloud.com" and not re.match(r"^https?://", mail_url, flags=re.IGNORECASE):
@@ -1590,6 +1618,17 @@ def fetch_latest_email_code(mail_url: str, email: str = "", timeout: int = 12, s
 
 def split_env_list(value: str) -> list[str]:
     return [item.strip().lower().lstrip("@") for item in re.split(r"[\s,，;；]+", str(value or "")) if item.strip()]
+
+
+def safe_input(prompt: str) -> str:
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            print(f"[input] 当前运行环境不可交互，跳过手动输入: {prompt}")
+            return ""
+        return input(prompt)
+    except EOFError:
+        print(f"[input] 读取输入失败（EOF），跳过手动输入: {prompt}")
+        return ""
 
 
 def email_domain(email: str) -> str:
@@ -1903,20 +1942,28 @@ def wait_any_email_code(
     since: datetime | None = None,
 ) -> str:
     normalized_mail_url = (mail_url or "").strip()
+    if normalized_mail_url:
+        print(f"[mail] 当前接码地址类型: {normalized_mail_url}")
+    else:
+        print("[mail] 当前接码地址为空，将走邮箱外部抓码分支")
     # 兼容 "email----email" 旧格式，避免阻断外部抓码
     if email and normalized_mail_url and normalized_mail_url.lower() == email.lower():
         normalized_mail_url = ""
     effective_timeout = timeout
     effective_interval = interval
+    effective_exclude = exclude
     if email and is_moemail_email(email):
         effective_timeout = min(int(timeout or 60), 60)
         effective_interval = min(float(interval or 2.0), 2.0)
+    # 对于 imap163 抓码，允许重复返回同一条最新验证码，避免被“旧码排除”误杀。
+    if normalized_mail_url.lower() == "imap163":
+        effective_exclude = set()
     return wait_mail_adapter_code(
         email=email,
         mail_url=normalized_mail_url,
         timeout=effective_timeout,
         interval=effective_interval,
-        exclude=exclude,
+        exclude=effective_exclude,
         fetch_latest=lambda url, account: fetch_hotmail_graph_mail_url_code(url, account, timeout=12)
         if url.startswith("hotmail_graph://")
         else fetch_latest_email_code(url, email=account, since=since),
@@ -2018,15 +2065,23 @@ def normalize_input_entry(entry: dict) -> dict:
     password = (entry.get("password") or "").strip()
     client_id = (entry.get("client_id") or "").strip()
     refresh_token = (entry.get("refresh_token") or "").strip()
-    # 兼容 "email----email" 旧格式：第二段不是可用接码地址
-    if email and mail_url and mail_url.lower() == email.lower():
-        mail_url = ""
+    lower_email = email.lower()
+    is_domain163 = lower_email.endswith("@edu.hanyiz2.com")
+    # 兼容历史旧格式：
+    # 1) "email----email" 误写格式
+    # 2) 域名邮箱缺失 mail_url 时应直接走 imap163
+    if email and mail_url and mail_url.lower() == lower_email:
+        mail_url = "imap163" if is_domain163 else ""
+    if is_domain163 and not mail_url:
+        mail_url = "imap163"
     if password.lower() in {"-", "--", "---", "----", "无", "none", "null", "empty", "验证码登录"}:
         password = ""
     if client_id and refresh_token and not mail_url:
         mail_url = f"hotmail_graph://{email}?client_id={urllib.parse.quote(client_id, safe='')}&refresh_token={urllib.parse.quote(refresh_token, safe='')}"
     source_format = "generic"
-    if email.lower().endswith("@icloud.com") and mail_url and not re.match(r"^https?://", mail_url, flags=re.IGNORECASE):
+    if is_domain163 and mail_url.lower() == "imap163":
+        source_format = "domain163"
+    if lower_email.endswith("@icloud.com") and mail_url and not re.match(r"^https?://", mail_url, flags=re.IGNORECASE):
         source_format = "icloud_query"
     return {
         "email": email,
@@ -2524,6 +2579,121 @@ def is_phone_required_page(page) -> bool:
     )
 
 
+def is_phone_link_limit_page(page) -> bool:
+    text_targets = [
+        "此电话号码已关联到可关联的最大账户",
+        "此电话号码已关联到可关联的最多账户",
+        "该电话号码已关联到可关联的最大账户",
+        "该电话号码已关联到可关联的最多账户",
+        "最多账户",
+        "maximum number of accounts",
+    ]
+    for target in text_targets:
+        try:
+            if page.locator(f"text={target}").first.is_visible(timeout=250):
+                return True
+        except Exception:
+            pass
+    normalized = ""
+    try:
+        body = page.locator("body").inner_text(timeout=1200).lower()
+        normalized = re.sub(r"\s+", " ", body).strip()
+    except Exception:
+        normalized = ""
+    if not normalized:
+        for frame in page.frames:
+            try:
+                frame_body = frame.locator("body").inner_text(timeout=600).lower()
+            except Exception:
+                continue
+            normalized = re.sub(r"\s+", " ", frame_body).strip()
+            if normalized:
+                break
+    if not normalized:
+        return False
+    hints = [
+        "此电话号码已关联到可关联的最大账户",
+        "此电话号码已关联到可关联的最多账户",
+        "该电话号码已关联到可关联的最大账户",
+        "该电话号码已关联到可关联的最多账户",
+        "已关联到可关联的最大账户",
+        "已关联到可关联的最多账户",
+        "already linked to the maximum number of accounts",
+        "linked to the maximum number of accounts",
+        "already associated with the maximum number of accounts",
+        "associated with the maximum number of accounts",
+        "maximum number of accounts",
+        "too many accounts are associated with this phone number",
+    ]
+    if any(hint in normalized for hint in hints):
+        return True
+    return bool(
+        re.search(r"(phone|number).*(maximum|too many).*(accounts?)", normalized)
+        or re.search(r"(maximum|too many).*(accounts?).*(phone|number)", normalized)
+        or re.search(r"(此|该)?电话号码.*已关联到可关联的最(大|多)账户", normalized)
+        or re.search(r"已关联到可关联的最(大|多)账户", normalized)
+    )
+
+
+def is_phone_number_rejected_page(page) -> bool:
+    reject_texts = [
+        "Try a different phone number",
+        "Use a different phone number",
+        "This phone number is not supported",
+        "Phone number is not valid",
+        "Invalid phone number",
+        "请使用其他手机号",
+        "请更换手机号",
+        "手机号无效",
+        "电话号码不可用",
+    ]
+    for txt in reject_texts:
+        try:
+            if page.locator(f"text={txt}").first.is_visible(timeout=300):
+                try:
+                    page.locator('button:has-text("OK"), button:has-text("确定")').first.click(timeout=800)
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+    for frame in page.frames:
+        for txt in reject_texts:
+            try:
+                if frame.locator(f"text={txt}").first.is_visible(timeout=200):
+                    return True
+            except Exception:
+                pass
+    try:
+        body = page.locator("body").inner_text(timeout=1200).lower()
+    except Exception:
+        return False
+    normalized = re.sub(r"\s+", " ", body).strip()
+    return any(hint.lower() in normalized for hint in reject_texts)
+
+
+def phone_page_text_hint(page, limit: int = 220) -> str:
+    try:
+        body = page.locator("body").inner_text(timeout=1200)
+    except Exception:
+        body = ""
+    text = re.sub(r"\s+", " ", str(body or "")).strip()
+    if not text:
+        for frame in page.frames:
+            try:
+                frame_body = frame.locator("body").inner_text(timeout=500)
+            except Exception:
+                continue
+            text = re.sub(r"\s+", " ", str(frame_body or "")).strip()
+            if text:
+                break
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
 def hero_sms_enabled(args) -> bool:
     return bool(str(getattr(args, "hero_sms_api_key", "") or "").strip() and str(getattr(args, "hero_sms_country", "") or "").strip())
 
@@ -2723,6 +2893,8 @@ def fill_phone_and_wait_sms_page(page, phone: str, country: PhoneCountry) -> Non
         raise RuntimeError("手机号提交按钮点击失败")
     print("[SMS] 已点击手机号页面继续/提交按钮，等待验证码页面", flush=True)
     time.sleep(4)
+    if is_phone_link_limit_page(page):
+        raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
 
 
 def find_sms_code_input(page):
@@ -2745,8 +2917,50 @@ def find_sms_code_input(page):
                     name = locator.get_attribute("name", timeout=400) or ""
                 except Exception:
                     name = ""
+                try:
+                    placeholder = locator.get_attribute("placeholder", timeout=400) or ""
+                except Exception:
+                    placeholder = ""
+                try:
+                    auto_complete = locator.get_attribute("autocomplete", timeout=400) or ""
+                except Exception:
+                    auto_complete = ""
+                try:
+                    input_id = locator.get_attribute("id", timeout=400) or ""
+                except Exception:
+                    input_id = ""
+                try:
+                    aria_label = locator.get_attribute("aria-label", timeout=400) or ""
+                except Exception:
+                    aria_label = ""
+                try:
+                    max_length = locator.get_attribute("maxlength", timeout=400) or ""
+                except Exception:
+                    max_length = ""
+                merged = " ".join(
+                    [
+                        str(name or ""),
+                        str(placeholder or ""),
+                        str(auto_complete or ""),
+                        str(input_id or ""),
+                        str(aria_label or ""),
+                    ]
+                ).lower()
                 if name == "phoneNumberInput":
                     continue
+                if any(h in merged for h in ("phone", "tel", "手机号", "电话号码", "电话")):
+                    continue
+                is_broad_selector = selector in ('input[inputmode="numeric"]', 'input[type="tel"]', 'input[type="text"]', 'input[type="number"]')
+                if is_broad_selector:
+                    has_code_hint = any(h in merged for h in ("code", "otp", "验证码", "verification"))
+                    short_max_len = False
+                    try:
+                        ml = int(str(max_length).strip())
+                        short_max_len = 4 <= ml <= 8
+                    except Exception:
+                        short_max_len = False
+                    if auto_complete != "one-time-code" and not has_code_hint and not short_max_len:
+                        continue
                 return locator
         except Exception:
             continue
@@ -2754,14 +2968,27 @@ def find_sms_code_input(page):
 
 
 def page_looks_like_sms_verification(page) -> bool:
-    lower_url = (page.url or "").lower()
-    if "contact-verification" in lower_url or "phone-verification" in lower_url:
-        return True
     try:
         text = page.locator("body").inner_text(timeout=800).lower()
     except Exception:
         text = ""
-    return bool(find_sms_code_input(page) and any(hint in text for hint in ("sms", "text message", "verification code", "验证码", "短信")))
+    if is_phone_link_limit_page(page) or is_phone_number_rejected_page(page):
+        return False
+    code_input = find_sms_code_input(page)
+    if not code_input:
+        return False
+    sms_hints = (
+        "enter code",
+        "verification code",
+        "one-time code",
+        "code sent",
+        "输入验证码",
+        "短信验证码",
+        "验证码",
+    )
+    if not any(hint in text for hint in sms_hints):
+        return False
+    return True
 
 
 def fill_sms_code(page, code: str) -> None:
@@ -2846,10 +3073,14 @@ def handle_phone_required_with_sms_provider(page, args, remaining_seconds) -> bo
         try:
             print(f"[SMS][POOL] 使用授权手机号池号码: {phone_number}", flush=True)
             fill_phone_and_wait_sms_page(page, phone_number, country)
+            if is_phone_link_limit_page(page):
+                raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
             deadline = time.time() + min(max(30, int(remaining_seconds())), timeout + 10)
             wait_round = 0
             while time.time() < deadline:
                 wait_round += 1
+                if is_phone_link_limit_page(page):
+                    raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
                 if page_looks_like_sms_verification(page):
                     print("[SMS][POOL] 页面已进入短信验证码阶段，开始从手机号池取码 URL 拉取验证码", flush=True)
                     break
@@ -2863,6 +3094,10 @@ def handle_phone_required_with_sms_provider(page, args, remaining_seconds) -> bo
             started = time.time()
             code = ""
             while time.time() - started < timeout:
+                if is_phone_link_limit_page(page):
+                    raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
+                if is_phone_number_rejected_page(page):
+                    raise RuntimeError("PHONE_LINK_LIMIT: 手机号被页面拒绝，请更换其他手机号")
                 try:
                     resp = requests.get(sms_api_url, timeout=10)
                     text = (resp.text or "").strip()
@@ -2878,7 +3113,12 @@ def handle_phone_required_with_sms_provider(page, args, remaining_seconds) -> bo
                     pass
                 time.sleep(max(1.0, poll_interval))
             if not code:
-                raise TimeoutError(f"手机号池验证码超时 ({timeout}s)")
+                if is_phone_link_limit_page(page):
+                    raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
+                if is_phone_number_rejected_page(page):
+                    raise RuntimeError("PHONE_LINK_LIMIT: 手机号被页面拒绝，请更换其他手机号")
+                hint = phone_page_text_hint(page)
+                raise RuntimeError(f"PHONE_POOL_TIMEOUT: 手机号池验证码超时 ({timeout}s) | page_hint={hint}")
 
             fill_sms_code(page, code)
             status, detail = wait_for_code_submit_result(page, timeout=12)
@@ -2891,6 +3131,8 @@ def handle_phone_required_with_sms_provider(page, args, remaining_seconds) -> bo
             return True
         except Exception as exc:
             print(f"[SMS][POOL] 授权手机号池验证失败: {exc}", flush=True)
+            if "PHONE_LINK_LIMIT" in str(exc):
+                raise
             if not sms_provider_enabled(args):
                 raise
 
@@ -2948,6 +3190,8 @@ def handle_phone_required_with_sms_provider(page, args, remaining_seconds) -> bo
         wait_round = 0
         while time.time() < deadline:
             wait_round += 1
+            if is_phone_link_limit_page(page):
+                raise RuntimeError("PHONE_LINK_LIMIT: 此电话号码已关联到可关联的最大账户")
             if page_looks_like_sms_verification(page):
                 print(f"[SMS] 页面已进入短信验证码阶段，开始向 {label} 拉取验证码", flush=True)
                 break
@@ -5183,7 +5427,7 @@ def cmd_gopay_manual_login(args) -> int:
                         mark_failure(args, f"等待验证码超过单账号总时限 {account_timeout_seconds}s", error_type="mail_code_timeout")
                         break
                     if not code:
-                        code = input("[gopay] 输入邮箱验证码: ").strip()
+                        code = safe_input("[gopay] 输入邮箱验证码: ").strip()
                     if not code:
                         print("[gopay] 验证码为空，取消。")
                         break
@@ -5423,7 +5667,16 @@ def cmd_login(args) -> int:
                             handle_phone_required_with_sms_provider(page, args, remaining_seconds)
                             continue
                         except Exception as exc:
-                            mark_failure(args, f"接码平台手机号验证失败: {exc}", error_type="phone_required")
+                            sms_error = str(exc or "")
+                            lower_sms_error = sms_error.lower()
+                            if "phone_link_limit" in lower_sms_error or "最大账户" in sms_error:
+                                mark_failure(
+                                    args,
+                                    f"授权手机号已关联到可关联的最大账户，当前手机号已弃用并继续后续账号: {sms_error}",
+                                    error_type="auth_phone_link_limit",
+                                )
+                            else:
+                                mark_failure(args, f"接码平台手机号验证失败: {exc}", error_type="phone_required")
                             break
                     else:
                         mark_failure(args, "授权阶段出现手机号必填页，已弃置当前账号并继续后续账号", error_type="phone_required")
@@ -5522,7 +5775,7 @@ def cmd_login(args) -> int:
                         mark_failure(args, f"等待验证码超过单账号总时限 {account_timeout_seconds}s", error_type="mail_code_timeout")
                         break
                     if not code:
-                        code = input("[login] 输入邮箱验证码: ").strip()
+                        code = safe_input("[login] 输入邮箱验证码: ").strip()
                     if not code:
                         print("[login] 验证码为空，取消。")
                         break

@@ -1,1 +1,4 @@
-# 格式：KW-ID----卡号----有效期----CVV----手机号----持卡人----地址----API地址
+﻿# Format:
+# card_number----exp_year/month----cvv----phone----name----address----sms_api_url
+# Example:
+# 4111111111111111----2030/12----123----+15550001111----JOHN DOE----123 MAIN ST,NEW YORK 10001,US----https://example.com/api/get_sms?key=YOUR_KEY

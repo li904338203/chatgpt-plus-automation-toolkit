@@ -14,9 +14,11 @@ block_cipher = None
 tcl_root = Path(sys.base_prefix) / "tcl"
 datas = []
 if (tcl_root / "tcl8.6" / "init.tcl").exists():
-    datas.append((str(tcl_root / "tcl8.6"), "tcl/tcl8.6"))
+    # PyInstaller 6 + Python 3.13 runtime hook expects _tcl_data under dist/_internal
+    datas.append((str(tcl_root / "tcl8.6"), "_tcl_data"))
 if (tcl_root / "tk8.6" / "tk.tcl").exists():
-    datas.append((str(tcl_root / "tk8.6"), "tcl/tk8.6"))
+    # PyInstaller 6 + Python 3.13 runtime hook expects _tk_data under dist/_internal
+    datas.append((str(tcl_root / "tk8.6"), "_tk_data"))
 
 
 a = Analysis(

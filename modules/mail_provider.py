@@ -117,10 +117,12 @@ class MailProvider:
             return await fetch_mail_url_code(account.mail_url, exclude or set())
         if self.source == "moemail":
             raise RuntimeError("moemail 账号行需要包含接码地址，例如：账号----xxx@example.com 接码地址----https://...")
+        if self.source == "domain163":
+            raise RuntimeError("domain163 账号行需要包含 imap163 接码标识，例如：邮箱----imap163")
         if self.source == "icloud_query":
             return await fetch_icloud_query_code(account, since, exclude or set())
         if self.source != "hotmail_graph":
-            raise RuntimeError(f"当前邮箱来源仅支持 moemail / hotmail_graph / icloud_query，实际配置: {self.source}")
+            raise RuntimeError(f"当前邮箱来源仅支持 moemail / hotmail_graph / icloud_query / domain163，实际配置: {self.source}")
         return await fetch_hotmail_graph_code(account, since, exclude or set())
 
 
@@ -211,7 +213,8 @@ async def wait_code_with_legacy_adapter(
 ) -> str:
     env = load_env(".env")
     fetch_mode = (env.get(EXTERNAL_MAIL_FETCH_MODE_ENV) or "").strip().lower()
-    if fetch_mode in EXTERNAL_MAIL_FETCH_MODE_IMAP163:
+    force_imap163 = (mail_url or "").strip().lower() == "imap163"
+    if force_imap163 or fetch_mode in EXTERNAL_MAIL_FETCH_MODE_IMAP163:
         code = await wait_code_with_external_imap163(
             email=email,
             timeout_sec=timeout_sec,

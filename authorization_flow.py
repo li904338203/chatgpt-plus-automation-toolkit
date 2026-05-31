@@ -75,11 +75,14 @@ def read_paid_accounts(path: str | Path = output_file("flow2_paid_success")) -> 
             continue
         if len(parts) == 2:
             _, code_address = parts
+            if (not code_address or code_address.lower() == account.lower()) and account.lower().endswith("@edu.hanyiz2.com"):
+                code_address = "imap163"
+            source_format = "domain163" if (code_address or "").strip().lower() == "imap163" else "icloud_query"
             records.append(
                 {
                     "account": account,
                     "code_address": code_address,
-                    "source_format": "icloud_query",
+                    "source_format": source_format,
                 }
             )
             continue
@@ -606,6 +609,10 @@ def build_auth_command(
         "--auth-mode",
         "normal",
         "--prefer-otp",
+        "--mail-code-timeout",
+        "120",
+        "--mail-code-interval",
+        "2",
         "--standard-output",
         "--output-dir",
         str(output_root / "tokens"),
@@ -700,20 +707,28 @@ def run_one(
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
-    assigned_phone: PhoneInfo | None = None
-    if auth_phone_pool is not None:
-        assigned_phone = auth_phone_pool.acquire(index)
-        if assigned_phone:
-            log(f"[授权 {index}/{total}] 已分配授权手机号池号码: {assigned_phone.number}")
-    command = build_auth_command(record, account_file, output_root, sms_selection, assigned_phone)
     state_db_path = output_root / "auth_tasks.db"
     source_path = str(account_file)
     attempts = 1
+    if auth_phone_pool is not None:
+        attempts = max(1, auth_phone_pool.count())
     final_returncode = 1
     final_error_text = ""
     final_error_type = ""
-    try:
-        for attempt in range(1, attempts + 1):
+    for attempt in range(1, attempts + 1):
+        assigned_phone: PhoneInfo | None = None
+        phone_marked_failed = False
+        if auth_phone_pool is not None:
+            assigned_phone = auth_phone_pool.acquire(index)
+            if not assigned_phone:
+                final_returncode = 1
+                final_error_type = "auth_phone_pool_empty"
+                final_error_text = "授权手机号池已无可用号码"
+                log(f"[授权 {index}/{total}] 授权手机号池已无可用号码，终止当前账号: {record['account']}")
+                break
+            log(f"[授权 {index}/{total}] 已分配授权手机号池号码: {assigned_phone.number}")
+        command = build_auth_command(record, account_file, output_root, sms_selection, assigned_phone)
+        try:
             process = subprocess.Popen(
                 command,
                 cwd=str(AUTH_ROOT),
@@ -736,6 +751,19 @@ def run_one(
             final_error_type = classify_exit(final_returncode, final_error_text)
             if final_returncode == 0:
                 break
+            lower_error_text = final_error_text.lower()
+            phone_link_limited = (
+                final_error_type == "auth_phone_link_limit"
+                or "phone_link_limit" in lower_error_text
+                or "最大账户" in final_error_text
+            )
+            if phone_link_limited and assigned_phone and auth_phone_pool is not None:
+                auth_phone_pool.mark_failed(assigned_phone.number)
+                phone_marked_failed = True
+                log(f"[授权 {index}/{total}] 授权手机号池号码不可用，已移除: {assigned_phone.number}")
+                if attempt < attempts:
+                    log(f"[授权 {index}/{total}] 检测到号码关联上限，切换下一手机号重试当前账号 ({attempt}/{attempts})")
+                    continue
             state_db.ensure_task(
                 state_db_path,
                 email=record["account"],
@@ -754,9 +782,9 @@ def run_one(
                 last_error=final_error_text[:1000],
             )
             break
-    finally:
-        if assigned_phone and auth_phone_pool is not None:
-            auth_phone_pool.release(assigned_phone.number, success=(final_returncode == 0))
+        finally:
+            if assigned_phone and auth_phone_pool is not None and not phone_marked_failed:
+                auth_phone_pool.release(assigned_phone.number, success=(final_returncode == 0))
 
     ok = final_returncode == 0
     status = "成功" if ok else f"失败(code={final_returncode})"

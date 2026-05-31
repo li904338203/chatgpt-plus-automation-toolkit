@@ -188,7 +188,9 @@ class RunPage(ttk.Frame):
         button_row_1 = ttk.Frame(controls)
         button_row_1.pack(fill=X, padx=8, pady=(3, 2))
         button_row_2 = ttk.Frame(controls)
-        button_row_2.pack(fill=X, padx=8, pady=(2, 6))
+        button_row_2.pack(fill=X, padx=8, pady=(2, 2))
+        button_row_3 = ttk.Frame(controls)
+        button_row_3.pack(fill=X, padx=8, pady=(2, 6))
 
         ttk.Label(input_row, text="数量").pack(side=LEFT, padx=(0, 2))
         self.count_var = tk.StringVar(value="1")
@@ -201,11 +203,12 @@ class RunPage(ttk.Frame):
         self.mail_source_combo = ttk.Combobox(
             input_row,
             textvariable=self.mail_source_var,
-            values=("default", "hotmail", "moemail", "icloud"),
+            values=("default", "hotmail", "moemail", "icloud", "domain163"),
             width=10,
             state="readonly",
         )
         self.mail_source_combo.pack(side=LEFT, padx=4)
+        ttk.Button(input_row, text="域名邮箱", command=lambda: self.mail_source_var.set("domain163")).pack(side=LEFT, padx=4)
         ttk.Label(input_row, text="指定邮箱").pack(side=LEFT, padx=(10, 2))
         self.email_var = tk.StringVar(value="")
         ttk.Entry(input_row, textvariable=self.email_var, width=36).pack(side=LEFT, padx=4)
@@ -214,14 +217,13 @@ class RunPage(ttk.Frame):
         ttk.Button(button_row_1, text="流程2 无卡PayPal", command=lambda: self.start("paypal-flow2-nocard")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程2 Filler脚本", command=lambda: self.start("paypal-flow2-filler")).pack(side=LEFT, padx=4)
         ttk.Button(button_row_1, text="流程3 授权落盘", command=lambda: self.start("paypal-flow3")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_1, text="流程3 Session快捷导出", command=lambda: self.start("paypal-flow3-session")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_2, text="流程2 日本代理(真实卡)", command=lambda: self.start("paypal-flow2-jp")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_2, text="流程2 日本代理(无卡)", command=lambda: self.start("paypal-flow2-jp-nocard")).pack(side=LEFT, padx=4)
 
-        ttk.Button(button_row_2, text="全自动 真实卡", command=lambda: self.start("paypal-auto")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_2, text="全自动 无卡", command=lambda: self.start("paypal-auto-nocard")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_2, text="全自动 Filler脚本", command=lambda: self.start("paypal-auto-filler")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_2, text="全自动真实卡Session", command=lambda: self.start("paypal-auto-session")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_2, text="全自动无卡Session", command=lambda: self.start("paypal-auto-nocard-session")).pack(side=LEFT, padx=4)
-        ttk.Button(button_row_2, text="停止任务", command=self.stop).pack(side=RIGHT, padx=8)
+        ttk.Button(button_row_3, text="全自动 真实卡", command=lambda: self.start("paypal-auto")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_3, text="全自动 无卡", command=lambda: self.start("paypal-auto-nocard")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_3, text="全自动 Filler脚本", command=lambda: self.start("paypal-auto-filler")).pack(side=LEFT, padx=4)
+        ttk.Button(button_row_3, text="停止任务", command=self.stop).pack(side=RIGHT, padx=8)
 
         self.summary_var = tk.StringVar(value="成功 0 / 失败 0")
         ttk.Label(self, textvariable=self.summary_var).pack(fill=X, padx=10)

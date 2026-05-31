@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import random
 import re
 import time
@@ -27,7 +28,7 @@ PAYPAL_OUTPUT_ROOT = resolve_path("output/paypal注册")
 LINK_POOL_FILE = PAYPAL_OUTPUT_ROOT / "长链接账号" / "account.txt"
 PENDING_AUTH_DIR = PAYPAL_OUTPUT_ROOT / "待授权账号"
 PENDING_AUTH_FILE = PENDING_AUTH_DIR / "account.txt"
-PAYPAL_FLOW2_CODE_VERSION = "PAYPAL_AGREE_CONTINUE_FIX_2026-05-19_04"
+PAYPAL_FLOW2_CODE_VERSION = "PAYPAL_JP_PREFECTURE_FIX_2026-05-31_01"
 
 _RANDOM_CARD_PROFILES: list[tuple[str, str, str, str, str]] = [
     ("New York", "NY", "10001", "W 34th St", "US"),
@@ -51,6 +52,130 @@ _RANDOM_CARD_PROFILES: list[tuple[str, str, str, str, str]] = [
     ("Boston", "MA", "02110", "Atlantic Ave", "US"),
     ("Nashville", "TN", "37219", "Church St", "US"),
 ]
+
+_RANDOM_CARD_PROFILES_JP: list[tuple[str, str, str, str, str]] = [
+    ("Tokyo", "Tokyo", "1000001", "Chiyoda 1-1", "JP"),
+    ("Osaka", "Osaka", "5300001", "Kita Umeda 2-3", "JP"),
+    ("Yokohama", "Kanagawa", "2200012", "Nishi Minatomirai 1-4", "JP"),
+    ("Nagoya", "Aichi", "4600008", "Naka Sakae 3-5", "JP"),
+    ("Sapporo", "Hokkaido", "0600001", "Chuo Odori 2-6", "JP"),
+    ("Fukuoka", "Fukuoka", "8100001", "Chuo Tenjin 1-8", "JP"),
+    ("Kyoto", "Kyoto", "6008001", "Shimogyo Shijo 4-2", "JP"),
+    ("Kobe", "Hyogo", "6500001", "Chuo Sannomiya 2-9", "JP"),
+    ("Sendai", "Miyagi", "9800004", "Aoba Ichibancho 1-7", "JP"),
+    ("Hiroshima", "Hiroshima", "7300011", "Naka Motomachi 1-3", "JP"),
+]
+
+_JP_PREFECTURE_LABELS: dict[str, str] = {
+    "Tokyo": "東京都",
+    "Osaka": "大阪府",
+    "Kanagawa": "神奈川県",
+    "Aichi": "愛知県",
+    "Hokkaido": "北海道",
+    "Fukuoka": "福岡県",
+    "Kyoto": "京都府",
+    "Hyogo": "兵庫県",
+    "Miyagi": "宮城県",
+    "Hiroshima": "広島県",
+}
+
+_JP_PAYPAL_PREFECTURE_CODES: dict[str, str] = {
+    "Tokyo": "TOKYO-TO",
+    "Osaka": "OSAKA-FU",
+    "Kanagawa": "KANAGAWA-KEN",
+    "Aichi": "AICHI-KEN",
+    "Hokkaido": "HOKKAIDO",
+    "Fukuoka": "FUKUOKA-KEN",
+    "Kyoto": "KYOTO-FU",
+    "Hyogo": "HYOGO-KEN",
+    "Miyagi": "MIYAGI-KEN",
+    "Hiroshima": "HIROSHIMA-KEN",
+}
+
+_JP_FIRST_NAME_META: dict[str, tuple[str, str]] = {
+    "Haruto": ("はると", "晴斗"),
+    "Yui": ("ゆい", "結衣"),
+    "Sota": ("そうた", "蒼太"),
+    "Sakura": ("さくら", "桜"),
+    "Ren": ("れん", "蓮"),
+    "Yuna": ("ゆな", "優奈"),
+    "Daiki": ("だいき", "大輝"),
+    "Mio": ("みお", "美桜"),
+}
+
+_JP_LAST_NAME_META: dict[str, tuple[str, str]] = {
+    "Sato": ("さとう", "佐藤"),
+    "Suzuki": ("すずき", "鈴木"),
+    "Takahashi": ("たかはし", "高橋"),
+    "Tanaka": ("たなか", "田中"),
+    "Watanabe": ("わたなべ", "渡辺"),
+    "Ito": ("いとう", "伊藤"),
+    "Yamamoto": ("やまもと", "山本"),
+    "Nakamura": ("なかむら", "中村"),
+}
+
+
+def _normalize_flow2_region_mode(mode: str | None) -> str:
+    value = (mode or "").strip().lower()
+    if value in {"jp", "japan", "日本"}:
+        return "jp"
+    return "default"
+
+
+def _billing_country_code(region_mode: str) -> str:
+    return "JP" if _normalize_flow2_region_mode(region_mode) == "jp" else "US"
+
+
+def _with_billing_profile(base_card: CardInfo, billing_card: CardInfo) -> CardInfo:
+    """保留原卡号/有效期/CVV，仅替换账单资料。"""
+    return CardInfo(
+        number=base_card.number,
+        exp_month=base_card.exp_month,
+        exp_year=base_card.exp_year,
+        cvv=base_card.cvv,
+        holder_name=billing_card.holder_name,
+        first_name=billing_card.first_name,
+        last_name=billing_card.last_name,
+        street=billing_card.street,
+        city=billing_card.city,
+        state=billing_card.state,
+        zip_code=billing_card.zip_code,
+        country=billing_card.country,
+        phone=base_card.phone,
+        sms_api_url=base_card.sms_api_url,
+        raw_line=base_card.raw_line,
+    )
+
+
+def _jp_birthdate_for_email(email: str) -> str:
+    seed = int(hashlib.sha256((email or "").lower().encode("utf-8")).hexdigest()[:8], 16)
+    year = 1986 + (seed % 14)  # 1986-1999
+    month = 1 + ((seed >> 8) % 12)
+    day = 1 + ((seed >> 16) % 28)
+    return f"{year:04d}/{month:02d}/{day:02d}"
+
+
+def _jp_identity_values(card: CardInfo, email: str) -> tuple[str, str, str, str, str]:
+    first_key = (card.first_name or "").strip()
+    last_key = (card.last_name or "").strip()
+    first_kana, first_kanji = _JP_FIRST_NAME_META.get(first_key, ("だいき", "大輝"))
+    last_kana, last_kanji = _JP_LAST_NAME_META.get(last_key, ("すずき", "鈴木"))
+    birth = _jp_birthdate_for_email(email)
+    return birth, first_kana, last_kana, first_kanji, last_kanji
+
+
+def _hiragana_to_katakana(text: str) -> str:
+    if not text:
+        return ""
+    out: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        # Hiragana range -> Katakana range
+        if 0x3041 <= code <= 0x3096:
+            out.append(chr(code + 0x60))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def is_local_random_card_mode(env: dict[str, str]) -> bool:
@@ -76,18 +201,30 @@ def _build_luhn_card_number(prefix: str, random_part_length: int, *, rng: random
     return body + _luhn_check_digit(body)
 
 
-def _generate_local_random_card(index: int, email: str, env: dict[str, str]) -> CardInfo:
+def _generate_local_random_card(
+    index: int,
+    email: str,
+    env: dict[str, str],
+    *,
+    region_mode: str = "default",
+) -> CardInfo:
     seed_raw = f"{email.lower()}::{index}::{time.time_ns()}"
     seed = int(hashlib.sha256(seed_raw.encode("utf-8")).hexdigest()[:16], 16)
     rng = random.Random(seed)
 
-    first_pool = ["James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda"]
-    last_pool = ["Smith", "Johnson", "Williams", "Brown", "Davis", "Miller", "Wilson", "Moore"]
+    if _normalize_flow2_region_mode(region_mode) == "jp":
+        first_pool = ["Haruto", "Yui", "Sota", "Sakura", "Ren", "Yuna", "Daiki", "Mio"]
+        last_pool = ["Sato", "Suzuki", "Takahashi", "Tanaka", "Watanabe", "Ito", "Yamamoto", "Nakamura"]
+        profile = _RANDOM_CARD_PROFILES_JP[rng.randrange(len(_RANDOM_CARD_PROFILES_JP))]
+    else:
+        first_pool = ["James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda"]
+        last_pool = ["Smith", "Johnson", "Williams", "Brown", "Davis", "Miller", "Wilson", "Moore"]
+        profile = _RANDOM_CARD_PROFILES[rng.randrange(len(_RANDOM_CARD_PROFILES))]
+
     first_name = first_pool[rng.randrange(len(first_pool))]
     last_name = last_pool[rng.randrange(len(last_pool))]
     holder = f"{first_name} {last_name}"
 
-    profile = _RANDOM_CARD_PROFILES[rng.randrange(len(_RANDOM_CARD_PROFILES))]
     city, state, zip_code, street_base, country = profile
     street_no = rng.randint(10, 9999)
     street = f"{street_no} {street_base}"
@@ -229,25 +366,217 @@ def generate_paypal_password(email: str) -> str:
 
 def poll_sms_code(api_url: str, *, timeout: int = 120, interval: int = 5) -> str:
     """轮询手机 API 获取验证码。"""
+    def _extract_code(text: str) -> str | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+
+        # 1) 兼容历史 "ok|短信内容" / "no|暂无验证码" 风格
+        parts = raw.split("|", 2)
+        status = parts[0].lower() if parts else ""
+        content = parts[1] if len(parts) > 1 else ""
+        if status and status != "no" and content and content != "暂无验证码":
+            m = re.search(r"\b(\d{4,8})\b", content)
+            if m:
+                return m.group(1)
+
+        # 2) 兼容 JSON 风格（常见字段：SmsCode / code / smsCode / SmsContent / message）
+        if raw.startswith("{") or raw.startswith("["):
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = None
+            if data is None:
+                return None
+            rows = data if isinstance(data, list) else [data]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                for key in ("SmsCode", "smsCode", "code", "Code", "otp", "Otp"):
+                    val = str(row.get(key, "")).strip()
+                    if re.fullmatch(r"\d{4,8}", val):
+                        return val
+                merged = " ".join(
+                    str(row.get(k, "")).strip()
+                    for k in ("SmsContent", "smsContent", "content", "message", "msg", "body")
+                ).strip()
+                if merged:
+                    m = re.search(r"\b(\d{4,8})\b", merged)
+                    if m:
+                        return m.group(1)
+
+        # 3) 兜底：直接从全文本提取 4-8 位数字
+        m = re.search(r"\b(\d{4,8})\b", raw)
+        if m:
+            return m.group(1)
+        return None
+
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = requests.get(api_url, timeout=10)
             text = resp.text.strip()
-            parts = text.split("|", 2)
-            status = parts[0].lower() if parts else ""
-            content = parts[1] if len(parts) > 1 else ""
-            if status != "no" and content and content != "暂无验证码":
-                code_match = re.search(r"\b(\d{4,6})\b", content)
-                if code_match:
-                    return code_match.group(1)
+            code = _extract_code(text)
+            if code:
+                return code
         except Exception:
             pass
         time.sleep(interval)
     raise TimeoutError(f"手机验证码超时 ({timeout}s)")
 
 
-async def fill_stripe(page, email: str, card: CardInfo) -> None:
+async def _fill_paypal_jp_identity(page, *, email: str, card: CardInfo) -> None:
+    birth, first_kana, last_kana, first_kanji, last_kanji = _jp_identity_values(card, email)
+
+    # 1) 生日
+    dob_selectors = [
+        'input[name*="birth" i]',
+        'input[id*="birth" i]',
+        'input[placeholder*="年/月/日"]',
+        'input[aria-label*="生年月日" i]',
+    ]
+    for sel in dob_selectors:
+        try:
+            loc = page.locator(f"{sel}:visible").first
+            if await loc.is_visible(timeout=800):
+                await loc.fill("", timeout=1500)
+                await loc.fill(birth, timeout=3000)
+                break
+        except Exception:
+            continue
+
+    # 2) 假名 + 汉字（兜底用 JS，按字段语义和空值状态填充）
+    try:
+        result = await page.evaluate(
+            """(payload) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8) return false;
+                    const st = window.getComputedStyle(el);
+                    if (!st) return false;
+                    if (st.display === 'none' || st.visibility === 'hidden') return false;
+                    if (Number(st.opacity || '1') < 0.05) return false;
+                    return !el.disabled && !el.readOnly;
+                };
+                const setVal = (el, v) => {
+                    const proto = HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+                    else el.value = v;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                };
+                const sig = (el) => {
+                    const p = String(el.placeholder || '').toLowerCase();
+                    const a = String(el.getAttribute('aria-label') || '').toLowerCase();
+                    const n = String(el.name || '').toLowerCase();
+                    const i = String(el.id || '').toLowerCase();
+                    const t = (el.closest('label')?.innerText || el.parentElement?.innerText || '').toLowerCase();
+                    return `${p} ${a} ${n} ${i} ${t}`;
+                };
+                const isExcluded = (s) => /email|mail|phone|zip|postal|address|city|street|state|country|card|cvv|exp|password/.test(s);
+                const inputs = Array.from(document.querySelectorAll('input'))
+                    .filter(isVisible)
+                    .filter((el) => {
+                        const type = String(el.type || 'text').toLowerCase();
+                        return ['text', 'search', 'tel', ''].includes(type);
+                    });
+
+                const used = new Set();
+
+                // DOB
+                for (const el of inputs) {
+                    const s = sig(el);
+                    if (s.includes('生年月日') || s.includes('birth') || s.includes('年/月/日')) {
+                        if (!String(el.value || '').trim()) setVal(el, payload.birth);
+                        used.add(el);
+                        break;
+                    }
+                }
+
+                // Kana fields
+                const kanaCandidates = inputs.filter((el) => {
+                    const s = sig(el);
+                    return s.includes('かな') || s.includes('カナ') || s.includes('furigana') || s.includes('phonetic') || s.includes('kana');
+                }).filter((el) => !used.has(el));
+                const setIfEmpty = (el, v) => {
+                    if (!el) return false;
+                    if (String(el.value || '').trim()) return false;
+                    setVal(el, v);
+                    return true;
+                };
+                let kanaFirst = false;
+                let kanaLast = false;
+                for (const el of kanaCandidates) {
+                    const s = sig(el);
+                    if (!kanaFirst && /(^|\\s)(名|first|given)($|\\s)/.test(s)) kanaFirst = setIfEmpty(el, payload.firstKana) || kanaFirst;
+                    if (!kanaLast && /(^|\\s)(姓|last|family)($|\\s)/.test(s)) kanaLast = setIfEmpty(el, payload.lastKana) || kanaLast;
+                }
+                const kanaByLeft = kanaCandidates.slice().sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+                if (!kanaFirst && kanaByLeft[0]) kanaFirst = setIfEmpty(kanaByLeft[0], payload.firstKana) || kanaFirst;
+                if (!kanaLast && kanaByLeft[1]) kanaLast = setIfEmpty(kanaByLeft[1], payload.lastKana) || kanaLast;
+                kanaCandidates.forEach((el) => used.add(el));
+
+                // Kanji fields: 优先“漢字 区域 + 名/姓语义 + 非地址邮箱类字段”
+                const kanjiCandidates = inputs.filter((el) => {
+                    if (used.has(el)) return false;
+                    const s = sig(el);
+                    if (isExcluded(s)) return false;
+                    if (s.includes('かな') || s.includes('カナ') || s.includes('furigana') || s.includes('phonetic') || s.includes('kana')) return false;
+                    if (s.includes('漢字')) return true;
+                    return s.includes('名') || s.includes('姓') || s.includes('name') || s.includes('first') || s.includes('last');
+                });
+                let kanjiFirst = false;
+                let kanjiLast = false;
+                for (const el of kanjiCandidates) {
+                    const s = sig(el);
+                    if (!kanjiFirst && /(^|\\s)(名|first|given)($|\\s)/.test(s)) kanjiFirst = setIfEmpty(el, payload.firstKanji) || kanjiFirst;
+                    if (!kanjiLast && /(^|\\s)(姓|last|family)($|\\s)/.test(s)) kanjiLast = setIfEmpty(el, payload.lastKanji) || kanjiLast;
+                }
+                const kanjiByLeft = kanjiCandidates.slice().sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+                if (!kanjiFirst && kanjiByLeft[0]) kanjiFirst = setIfEmpty(kanjiByLeft[0], payload.firstKanji) || kanjiFirst;
+                if (!kanjiLast && kanjiByLeft[1]) kanjiLast = setIfEmpty(kanjiByLeft[1], payload.lastKanji) || kanjiLast;
+
+                // 必填兜底：如果还有“名/姓”空框，按语义再补一次（避免只填了一个）
+                const empties = inputs.filter((el) => !String(el.value || '').trim());
+                for (const el of empties) {
+                    const s = sig(el);
+                    if (isExcluded(s)) continue;
+                    if (s.includes('かな') || s.includes('カナ') || s.includes('furigana') || s.includes('phonetic') || s.includes('kana')) continue;
+                    if (!kanjiFirst && /(^|\\s)(名|first|given)($|\\s)/.test(s)) kanjiFirst = setIfEmpty(el, payload.firstKanji) || kanjiFirst;
+                    if (!kanjiLast && /(^|\\s)(姓|last|family)($|\\s)/.test(s)) kanjiLast = setIfEmpty(el, payload.lastKanji) || kanjiLast;
+                }
+
+                return {
+                    kanaCount: kanaCandidates.length,
+                    kanjiCount: kanjiCandidates.length,
+                    kanaFirst,
+                    kanaLast,
+                    kanjiFirst,
+                    kanjiLast,
+                };
+            }""",
+            {
+                "birth": birth,
+                "firstKana": first_kana,
+                "lastKana": last_kana,
+                "firstKanji": first_kanji,
+                "lastKanji": last_kanji,
+            },
+        )
+        log(
+            f"[PayPal][JP] 已尝试填充生日/假名/汉字: dob={birth}, "
+            f"kana_candidates={(result or {}).get('kanaCount', 0)}, "
+            f"kanji_candidates={(result or {}).get('kanjiCount', 0)}, "
+            f"kana_ok=({(result or {}).get('kanaFirst', False)},{(result or {}).get('kanaLast', False)}), "
+            f"kanji_ok=({(result or {}).get('kanjiFirst', False)},{(result or {}).get('kanjiLast', False)})"
+        )
+    except Exception as exc:
+        log(f"[PayPal][JP] 日本实名字段填充异常: {exc}")
+
+async def fill_stripe(page, email: str, card: CardInfo, *, country_code: str = "US") -> None:
     """Stripe 页面：选 PayPal + 填地址 + Subscribe。"""
     await page.wait_for_load_state("domcontentloaded", timeout=30000)
     await page.wait_for_timeout(8000)
@@ -269,26 +598,31 @@ async def fill_stripe(page, email: str, card: CardInfo) -> None:
         await page.evaluate('document.querySelector("[data-testid=\\"paypal-accordion-item-button\\"]")?.click()')
     await page.wait_for_timeout(2000)
 
-    # 国家选 US - 先等待下拉框可交互
+    desired_country = "JP" if str(country_code or "").upper() == "JP" else "US"
+    desired_labels = ["Japan", "日本"] if desired_country == "JP" else ["United States", "美国"]
+
+    # 国家选择 - 先等待下拉框可交互
     country_select = page.locator('#billingCountry, select[name*="country" i], select[autocomplete="country"]').first
     try:
         await country_select.wait_for(state="visible", timeout=8000)
-        await country_select.select_option("US", timeout=5000)
+        await country_select.select_option(desired_country, timeout=5000)
     except Exception:
-        try:
-            await country_select.select_option(label="United States", timeout=3000)
-        except Exception:
-            pass
+        for lbl in desired_labels:
+            try:
+                await country_select.select_option(label=lbl, timeout=3000)
+                break
+            except Exception:
+                continue
 
     # 等待国家切换后页面重新渲染地址字段
     await page.wait_for_timeout(3000)
 
-    # 验证国家是否选中 US
+    # 验证国家是否选中目标国家
     try:
         current_val = await country_select.input_value()
-        if current_val != "US":
-            log(f"[Stripe] 国家仍为 {current_val}，再次尝试...")
-            await country_select.select_option("US", timeout=3000)
+        if current_val != desired_country:
+            log(f"[Stripe] 国家仍为 {current_val}，再次尝试切到 {desired_country}...")
+            await country_select.select_option(desired_country, timeout=3000)
             await page.wait_for_timeout(2000)
     except Exception:
         pass
@@ -301,55 +635,713 @@ async def fill_stripe(page, email: str, card: CardInfo) -> None:
     except Exception:
         pass
 
-    # 填地址
-    for selector, value in [
-        ('#billingAddressLine1, input[name*="addressLine1" i], input[name*="address" i], input[placeholder*="地址" i], input[placeholder*="Address" i]', card.street),
-        ('#billingLocality, input[name*="locality" i], input[name*="city" i], input[placeholder*="城市" i], input[placeholder*="City" i]', city_value),
-        ('#billingPostalCode, input[name*="postalCode" i], input[name*="zip" i], input[placeholder*="邮编" i], input[placeholder*="ZIP" i]', zip_value),
-    ]:
+    async def _safe_fill(selector: str, value: str, timeout: int = 5000) -> bool:
+        if not str(value or "").strip():
+            return False
+        val = str(value).strip()
+        # 先尝试可见输入框
         try:
-            await page.locator(selector).first.fill(value, timeout=5000)
+            loc = page.locator(f"{selector}:visible").first
+            if await loc.is_visible(timeout=1200):
+                await loc.fill("", timeout=2000)
+                await loc.fill(val, timeout=timeout)
+                read_back = (await loc.input_value()).strip()
+                if read_back:
+                    return True
         except Exception:
             pass
 
-    # State - 尝试多种方式匹配
-    try:
-        state_el = page.locator('#billingAdministrativeArea, select[name*="state" i]').first
-        if await state_el.is_visible(timeout=3000):
-            tag = await state_el.evaluate("el => el.tagName.toLowerCase()")
-            if tag == "select":
+        # 兜底：遍历可见节点，使用原生 setter 写入并触发事件链
+        try:
+            ok = await page.evaluate(
+                """(selector, value) => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (r.width < 6 || r.height < 6) return false;
+                        const st = window.getComputedStyle(el);
+                        if (!st) return false;
+                        if (st.display === 'none' || st.visibility === 'hidden') return false;
+                        if (Number(st.opacity || '1') < 0.05) return false;
+                        return !el.disabled && !el.readOnly;
+                    };
+                    const nodes = Array.from(document.querySelectorAll(selector)).filter(isVisible);
+                    if (!nodes.length) return false;
+                    const input = nodes[0];
+                    const proto = input.tagName.toLowerCase() === 'textarea'
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && typeof desc.set === 'function') desc.set.call(input, value);
+                    else input.value = value;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                    return String(input.value || '').trim().length > 0;
+                }""",
+                selector,
+                val,
+            )
+            return bool(ok)
+        except Exception:
+            return False
+
+    # 日本地址表单通常需要“邮编 -> 都道府县 -> 城市 -> 地址”顺序
+    if desired_country == "JP":
+        await _safe_fill(
+            '#billingPostalCode, input[name*="postalCode" i], input[name*="zip" i], input[placeholder*="邮编" i], input[placeholder*="ZIP" i]',
+            zip_value,
+        )
+
+        # 选择辖区（都道府县）
+        pref_label = _JP_PREFECTURE_LABELS.get(card.state, card.state)
+        pref_keys = [
+            pref_label,
+            card.state,
+            f"{pref_label} {card.state}",
+            f"{pref_label} - {card.state}",
+            f"{pref_label} — {card.state}",
+        ]
+        pref_select_selector = (
+            "#billingAdministrativeArea, #billingRegion, "
+            'select[name*="administrative" i], select[name*="state" i], '
+            'select[name*="region" i], select[name*="province" i], '
+            'select[id*="administrative" i], select[id*="state" i], '
+            'select[id*="region" i], select[id*="province" i], '
+            'select[autocomplete="address-level1"]'
+        )
+        pref_any_selector = (
+            f"{pref_select_selector}, "
+            'input[name*="administrative" i], input[name*="state" i], '
+            'input[name*="region" i], input[name*="province" i], '
+            'input[id*="administrative" i], input[id*="state" i], '
+            'input[id*="region" i], input[id*="province" i], '
+            'input[autocomplete="address-level1"], '
+            '[role="combobox"][aria-label*="都道府県"], '
+            '[role="combobox"][aria-label*="prefecture" i], '
+            '[role="combobox"][aria-label*="state" i], '
+            '[role="combobox"][name*="administrative" i], '
+            '[role="combobox"][name*="state" i], '
+            '[role="combobox"][name*="region" i], '
+            '[aria-label*="都道府県"], [aria-label*="prefecture" i], [aria-label*="state" i]'
+        )
+
+        async def _switch_stripe_prefecture_like_country(labels: list[str]) -> bool:
+            # 第一段：像国家切换一样，先尝试原生 select_option
+            try:
+                pref_sel = page.locator(
+                    pref_select_selector
+                ).first
+                if await pref_sel.is_visible(timeout=2000):
+                    for key in labels:
+                        if not key:
+                            continue
+                        try:
+                            await pref_sel.select_option(key, timeout=2000)
+                            return True
+                        except Exception:
+                            pass
+                        try:
+                            await pref_sel.select_option(label=key, timeout=2000)
+                            return True
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+            # 第二段：像国家切换一样，JS 遍历 select 的 options 做 value/label 匹配
+            try:
+                result = await page.evaluate(
+                    """(labels) => {
+                        const keys = (labels || []).map(x => String(x || '').toLowerCase()).filter(Boolean);
+                        const selects = Array.from(document.querySelectorAll('select'));
+                        const candidates = selects.filter((sel) => {
+                            const name = String(sel.name || '').toLowerCase();
+                            const id = String(sel.id || '').toLowerCase();
+                            const ac = String(sel.getAttribute('autocomplete') || '').toLowerCase();
+                            return (
+                                name.includes('administrative') || name.includes('state') || name.includes('region') || name.includes('province') ||
+                                id.includes('administrative') || id.includes('state') || id.includes('region') || id.includes('province') ||
+                                ac.includes('address-level1')
+                            );
+                        });
+                        for (const sel of candidates) {
+                            const opts = Array.from(sel.options || []);
+                            let hit = opts.find(o => keys.some(k => String(o.value || '').toLowerCase() === k));
+                            if (!hit) {
+                                hit = opts.find(o => {
+                                    const t = String(o.text || o.label || '').toLowerCase();
+                                    return keys.some(k => t.includes(k));
+                                });
+                            }
+                            if (!hit) continue;
+                            sel.value = String(hit.value || '');
+                            sel.dispatchEvent(new Event('input', {bubbles: true}));
+                            sel.dispatchEvent(new Event('change', {bubbles: true}));
+                            return {ok: true, value: sel.value || '', text: String(hit.text || hit.label || '')};
+                        }
+                        return {ok: false, value: '', text: ''};
+                    }""",
+                    labels,
+                )
+                return bool((result or {}).get("ok"))
+            except Exception:
+                return False
+
+        async def _verify_prefecture_selected(pref_label_value: str, state_key: str) -> tuple[bool, str]:
+            try:
+                result = await page.evaluate(
+                    """(payload) => {
+                        const prefLabel = String((payload && payload.prefLabel) || '');
+                        const stateKey = String((payload && payload.stateKey) || '');
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 8 || r.height < 8) return false;
+                            const st = window.getComputedStyle(el);
+                            if (!st) return false;
+                            if (st.display === 'none' || st.visibility === 'hidden') return false;
+                            if (Number(st.opacity || '1') < 0.05) return false;
+                            return true;
+                        };
+                        const keyA = String(prefLabel || '').toLowerCase();
+                        const keyB = String(stateKey || '').toLowerCase();
+                        const hasKey = (s) => {
+                            const t = String(s || '').toLowerCase();
+                            return (!!keyA && t.includes(keyA)) || (!!keyB && t.includes(keyB));
+                        };
+                        const textOf = (el) => String(el?.innerText || el?.textContent || '').trim();
+                        let candidates = Array.from(document.querySelectorAll(
+                            String((payload && payload.selector) || '')
+                        )).filter(isVisible);
+                        if (!candidates.length) {
+                            // 文本反查：从“都道府県”标签附近找真实控件
+                            const labels = Array.from(document.querySelectorAll('*'))
+                                .filter(isVisible)
+                                .filter(el => {
+                                    const t = String(el.innerText || el.textContent || '').trim();
+                                    return /都道府県/.test(t) && t.length <= 30;
+                                });
+                            if (labels.length) {
+                                const anchor = labels[0];
+                                const host = anchor.closest('label,div,section,fieldset,li') || anchor.parentElement || anchor;
+                                const scoped = Array.from(
+                                    (host.parentElement || host).querySelectorAll('select,input,[role="combobox"],[aria-haspopup="listbox"],button')
+                                ).filter(isVisible);
+                                if (scoped.length) {
+                                    candidates = scoped;
+                                } else {
+                                    const globalCands = Array.from(
+                                        document.querySelectorAll('select,input,[role="combobox"],button,[aria-haspopup="listbox"]')
+                                    ).filter(isVisible).filter(el => {
+                                        const hint = [
+                                            el.id || '', el.name || '', el.getAttribute('aria-label') || '',
+                                            el.getAttribute('placeholder') || '', el.getAttribute('data-testid') || '',
+                                            textOf(el),
+                                        ].join(' ').toLowerCase();
+                                        return /都道府県|prefecture|state|administrative|province|region/.test(hint);
+                                    });
+                                    if (globalCands.length) candidates = globalCands;
+                                    else return { ok: false, reason: 'no_candidate_with_label' };
+                                }
+                            } else {
+                                const globalCands = Array.from(
+                                    document.querySelectorAll('select,input,[role="combobox"],button,[aria-haspopup="listbox"]')
+                                ).filter(isVisible).filter(el => {
+                                    const hint = [
+                                        el.id || '', el.name || '', el.getAttribute('aria-label') || '',
+                                        el.getAttribute('placeholder') || '', el.getAttribute('data-testid') || '',
+                                        textOf(el),
+                                    ].join(' ').toLowerCase();
+                                    return /prefecture|state|administrative|province|region/.test(hint);
+                                });
+                                if (globalCands.length) candidates = globalCands;
+                                else return { ok: false, reason: 'no_candidate_no_label' };
+                            }
+                        }
+                        const el = candidates[0];
+                        const tag = el.tagName.toLowerCase();
+                        const ariaInvalid = String(el.getAttribute('aria-invalid') || '').toLowerCase();
+                        const rawValue = String(el.value || '').trim();
+                        const rawText = String(el.innerText || el.textContent || '').trim();
+                        const placeholderLike = /都道府県/.test(rawText) && !hasKey(rawText);
+                        let selected = false;
+                        if (tag === 'select') {
+                            const opt = el.options && el.options[el.selectedIndex || 0];
+                            const optText = String((opt && (opt.text || opt.label)) || '').trim();
+                            const optVal = String((opt && opt.value) || '').trim();
+                            selected = (ariaInvalid !== 'true') && (hasKey(optText) || hasKey(optVal));
+                            return {
+                                ok: !!selected,
+                                reason: selected ? 'select_ok' : `select_miss text=${optText} value=${optVal} ariaInvalid=${ariaInvalid}`,
+                            };
+                        }
+                        selected = (ariaInvalid !== 'true') && !placeholderLike && (hasKey(rawValue) || hasKey(rawText));
+                        return {
+                            ok: !!selected,
+                            reason: selected ? 'combo_ok' : `combo_miss value=${rawValue} text=${rawText} ariaInvalid=${ariaInvalid}`,
+                        };
+                    }""",
+                    {"prefLabel": pref_label_value, "stateKey": state_key, "selector": pref_any_selector},
+                )
+                return bool((result or {}).get("ok")), str((result or {}).get("reason") or "")
+            except Exception as exc:
+                return False, f"verify_exception:{exc}"
+
+        async def _pick_prefecture_by_role() -> bool:
+            names = [
+                f"{pref_label} — {card.state}",
+                f"{pref_label} - {card.state}",
+                f"{pref_label} {card.state}",
+                pref_label,
+                card.state,
+            ]
+            # 先用页面脚本做一次“打开下拉 + 匹配点击”，兼容自定义组件
+            try:
+                picked_js = await page.evaluate(
+                    """(labels) => {
+                        const norm = (s) => String(s || '')
+                            .toLowerCase()
+                            .replace(/[\\s\\-ー—‐－]/g, '')
+                            .replace(/[()（）]/g, '');
+                        const keys = (labels || []).map(norm).filter(Boolean);
+                        if (!keys.length) return false;
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 8 || r.height < 8) return false;
+                            const st = window.getComputedStyle(el);
+                            if (!st) return false;
+                            if (st.display === 'none' || st.visibility === 'hidden') return false;
+                            if (Number(st.opacity || '1') < 0.05) return false;
+                            return true;
+                        };
+                        const textOf = (el) => String(el?.innerText || el?.textContent || '').trim();
+                        const clickEl = (el) => {
+                            if (!el) return false;
+                            try { el.click(); return true; } catch {}
+                            try {
+                                const r = el.getBoundingClientRect();
+                                el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:r.left+8, clientY:r.top+8}));
+                                el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:r.left+8, clientY:r.top+8}));
+                                el.dispatchEvent(new MouseEvent('click', {bubbles:true, clientX:r.left+8, clientY:r.top+8}));
+                                return true;
+                            } catch {}
+                            return false;
+                        };
+
+                        // 1) 打开下拉
+                        const triggerSelectors = [
+                            '[role="combobox"][aria-label*="都道府県"]',
+                            '[role="combobox"][name*="administrative" i]',
+                            '[role="combobox"]',
+                            'button[aria-haspopup="listbox"]',
+                        ];
+                        let trigger = null;
+                        for (const sel of triggerSelectors) {
+                            const cands = Array.from(document.querySelectorAll(sel)).filter(isVisible);
+                            const hit = cands.find(el => /都道府県|prefecture|state/i.test(textOf(el) + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('name') || '')));
+                            if (hit) { trigger = hit; break; }
+                            if (!trigger && cands.length) trigger = cands[0];
+                        }
+                        if (!trigger) {
+                            const labelsText = Array.from(document.querySelectorAll('*'))
+                                .filter(isVisible)
+                                .find(el => /都道府県/.test(textOf(el)) && textOf(el).length < 20);
+                            if (labelsText) {
+                                const near = labelsText.closest('label,div,section') || labelsText.parentElement;
+                                if (near) {
+                                    trigger = near.querySelector('[role="combobox"],button[aria-haspopup="listbox"],input,select') || near;
+                                }
+                            }
+                        }
+                        if (trigger) clickEl(trigger);
+
+                        // 2) 匹配选项（role=option/listbox/menuitem/li）
+                        const optionSelectors = [
+                            '[role="option"]',
+                            '[role="listbox"] [role="option"]',
+                            'li[role="option"]',
+                            'div[role="option"]',
+                            '[role="menu"] [role="menuitem"]',
+                            'ul li',
+                        ];
+                        const options = [];
+                        for (const sel of optionSelectors) {
+                            for (const el of Array.from(document.querySelectorAll(sel))) {
+                                if (!isVisible(el)) continue;
+                                const t = textOf(el);
+                                if (!t) continue;
+                                options.push(el);
+                            }
+                        }
+                        const uniq = Array.from(new Set(options));
+                        const best = uniq.find(el => {
+                            const t = norm(textOf(el));
+                            return keys.some(k => t.includes(k));
+                        });
+                        if (best) return clickEl(best);
+
+                        // 3) 未命中时，选第一个可见候选（JP专用兜底，宁可先选上）
+                        if (uniq.length) return clickEl(uniq[0]);
+                        return false;
+                    }""",
+                    names,
+                )
+                if picked_js:
+                    return True
+            except Exception:
+                pass
+
+            # 打开都道府县下拉
+            opened = False
+            open_selectors = [
+                '[role="combobox"][aria-label*="都道府県"]',
+                '[role="combobox"][name*="administrative" i]',
+                '[role="combobox"][name*="region" i]',
+                '[role="combobox"][name*="province" i]',
+                '[role="combobox"]:has-text("都道府県")',
+                'button[aria-haspopup="listbox"]:has-text("都道府県")',
+                'button[aria-haspopup="listbox"][aria-label*="都道府県"]',
+                'button[aria-haspopup="listbox"][aria-label*="prefecture" i]',
+                'button[aria-haspopup="listbox"][aria-label*="state" i]',
+            ]
+            for sel in open_selectors:
                 try:
-                    await state_el.select_option(value=card.state, timeout=3000)
+                    trigger = page.locator(sel).first
+                    if await trigger.is_visible(timeout=1200):
+                        await trigger.click(timeout=2000)
+                        opened = True
+                        break
                 except Exception:
-                    # 尝试用全称
-                    state_names = {
-                        "MN": "Minnesota", "TN": "Tennessee", "CA": "California",
-                        "TX": "Texas", "NY": "New York", "FL": "Florida",
-                        "IL": "Illinois", "PA": "Pennsylvania", "OH": "Ohio",
-                        "GA": "Georgia", "NC": "North Carolina", "MI": "Michigan",
-                        "NJ": "New Jersey", "VA": "Virginia", "WA": "Washington",
-                        "AZ": "Arizona", "MA": "Massachusetts", "IN": "Indiana",
-                        "MO": "Missouri", "MD": "Maryland", "WI": "Wisconsin",
-                        "CO": "Colorado", "SC": "South Carolina", "AL": "Alabama",
-                        "LA": "Louisiana", "KY": "Kentucky", "OR": "Oregon",
-                        "OK": "Oklahoma", "CT": "Connecticut", "IA": "Iowa",
-                        "MS": "Mississippi", "AR": "Arkansas", "KS": "Kansas",
-                        "NV": "Nevada", "UT": "Utah", "NE": "Nebraska",
-                        "NM": "New Mexico", "WV": "West Virginia", "ID": "Idaho",
-                        "HI": "Hawaii", "ME": "Maine", "NH": "New Hampshire",
-                        "RI": "Rhode Island", "MT": "Montana", "DE": "Delaware",
-                        "SD": "South Dakota", "ND": "North Dakota", "AK": "Alaska",
-                        "VT": "Vermont", "WY": "Wyoming", "DC": "District of Columbia",
-                    }
-                    full_name = state_names.get(card.state, card.state)
+                    continue
+            if not opened:
+                try:
+                    # 点击标签附近触发
+                    lbl = page.locator('text=都道府県').first
+                    if await lbl.is_visible(timeout=1200):
+                        await lbl.click(timeout=2000)
+                        opened = True
+                except Exception:
+                    pass
+            if not opened:
+                return False
+
+            await page.wait_for_timeout(350)
+
+            # 优先 role=option
+            for name in names:
+                if not name:
+                    continue
+                try:
+                    opt = page.get_by_role("option", name=name).first
+                    if await opt.is_visible(timeout=1200):
+                        await opt.click(timeout=2000)
+                        return True
+                except Exception:
+                    pass
+
+            # 兜底：listbox 内文本匹配
+            for name in names:
+                if not name:
+                    continue
+                listbox_selectors = [
+                    f'[role="listbox"] >> text={name}',
+                    f'li[role="option"]:has-text("{name}")',
+                    f'div[role="option"]:has-text("{name}")',
+                ]
+                for sel in listbox_selectors:
                     try:
-                        await state_el.select_option(label=full_name, timeout=3000)
+                        opt2 = page.locator(sel).first
+                        if await opt2.is_visible(timeout=1000):
+                            await opt2.click(timeout=2000)
+                            return True
+                    except Exception:
+                        continue
+
+            # 最后一招：方向键+回车
+            try:
+                await page.keyboard.press("ArrowDown")
+                await page.wait_for_timeout(180)
+                await page.keyboard.press("Enter")
+                return True
+            except Exception:
+                return False
+
+        async def _pick_prefecture_by_tab_fallback() -> bool:
+            """不依赖下拉 DOM：从邮编框 Tab 到都道府県并键盘选中。"""
+            zip_sel = '#billingPostalCode, input[name*="postalCode" i], input[name*="zip" i], input[placeholder*="邮编" i], input[placeholder*="ZIP" i]'
+            try:
+                zip_input = page.locator(f"{zip_sel}:visible").first
+                if await zip_input.is_visible(timeout=1200):
+                    await zip_input.click(timeout=1500)
+                    await page.wait_for_timeout(120)
+                    await page.keyboard.press("Tab")
+                    await page.wait_for_timeout(150)
+                    await page.keyboard.press("Control+A")
+                    await page.keyboard.type(pref_label, delay=35)
+                    await page.wait_for_timeout(250)
+                    await page.keyboard.press("ArrowDown")
+                    await page.wait_for_timeout(150)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(250)
+                    return True
+            except Exception:
+                return False
+            return False
+
+        async def _pick_prefecture_by_label_api() -> bool:
+            """Playwright 标签定位兜底：直接按 label/aria-label 定位都道府県控件。"""
+            patterns = [r"都道府県", r"prefecture", r"state", r"province", r"region"]
+            for pattern in patterns:
+                try:
+                    field = page.get_by_label(re.compile(pattern, re.I)).first
+                    if not await field.is_visible(timeout=900):
+                        continue
+                    tag = await field.evaluate("el => el.tagName.toLowerCase()")
+                    if tag == "select":
+                        for key in [pref_label, card.state, f"{pref_label} {card.state}"]:
+                            if not key:
+                                continue
+                            try:
+                                await field.select_option(label=key, timeout=1400)
+                                return True
+                            except Exception:
+                                try:
+                                    await field.select_option(value=key, timeout=1400)
+                                    return True
+                                except Exception:
+                                    continue
+                    else:
+                        await field.click(timeout=1200)
+                        try:
+                            await field.fill("", timeout=1200)
+                        except Exception:
+                            pass
+                        await field.type(pref_label, delay=30)
+                        await page.wait_for_timeout(180)
+                        for key in [pref_label, card.state]:
+                            try:
+                                opt = page.locator(f'[role="option"]:has-text("{key}")').first
+                                if await opt.is_visible(timeout=800):
+                                    await opt.click(timeout=1200)
+                                    return True
+                            except Exception:
+                                continue
+                        try:
+                            await page.keyboard.press("Enter")
+                            return True
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+            return False
+
+        await page.wait_for_timeout(800)
+        await _safe_fill(
+            '#billingAddressLine1, input[name*="addressLine1" i], input[name*="address" i], input[placeholder*="地址" i], input[placeholder*="Address" i]',
+            card.street,
+        )
+        # Stripe 日本表单在地址输入后可能重置“城市”，最后再回填一次并校验
+        city_selector = '#billingLocality, input[name*="locality" i], input[name*="city" i], input[placeholder*="城市" i], input[placeholder*="City" i]'
+        city_ok = await _safe_fill(city_selector, city_value)
+        if not city_ok:
+            await page.wait_for_timeout(600)
+            city_ok = await _safe_fill(city_selector, city_value)
+        if not city_ok:
+            log(f"[Stripe] ⚠️ 日本地址城市填充失败: city={city_value}")
+
+        # 地址阶段再统一执行都道府县选择与校验
+        pref_ok = await _switch_stripe_prefecture_like_country(pref_keys)
+        v_ok, v_reason = await _verify_prefecture_selected(pref_label, card.state)
+        log(
+            f"[Stripe][JP] pref step1 like-country: attempted={pref_ok} "
+            f"committed={v_ok} reason={v_reason}"
+        )
+
+        try:
+            state_el = page.locator(pref_any_selector).first
+            if await state_el.is_visible(timeout=3000):
+                tag = await state_el.evaluate("el => el.tagName.toLowerCase()")
+                if tag == "select":
+                    picked = False
+                    for v in [pref_label, card.state, f"{pref_label} — {card.state}", f"{pref_label} {card.state}"]:
+                        if not v:
+                            continue
+                        try:
+                            await state_el.select_option(value=v, timeout=2500)
+                            picked = True
+                            break
+                        except Exception:
+                            try:
+                                await state_el.select_option(label=v, timeout=2500)
+                                picked = True
+                                break
+                            except Exception:
+                                continue
+                    if not picked:
+                        await page.evaluate(
+                            """(targetKeys) => {
+                                const keys = (targetKeys || []).map(x => String(x || '').toLowerCase()).filter(Boolean);
+                                const selectors = [
+                                    '#billingAdministrativeArea',
+                                    '#billingRegion',
+                                    'select[name*="administrative" i]',
+                                    'select[name*="state" i]',
+                                    'select[name*="region" i]',
+                                    'select[name*="province" i]',
+                                    'select[id*="administrative" i]',
+                                    'select[id*="state" i]',
+                                    'select[id*="region" i]',
+                                    'select[id*="province" i]',
+                                    'select[autocomplete="address-level1"]'
+                                ];
+                                const sel = selectors.map(s => document.querySelector(s)).find(Boolean);
+                                if (!sel || sel.tagName.toLowerCase() !== 'select') return false;
+                                const opts = Array.from(sel.options || []);
+                                const hit = opts.find(o => {
+                                    const v = String(o.value || '').toLowerCase();
+                                    const t = String(o.text || o.label || '').toLowerCase();
+                                    return keys.some(k => v === k || t.includes(k));
+                                });
+                                if (!hit) return false;
+                                sel.value = String(hit.value || '');
+                                sel.dispatchEvent(new Event('input', {bubbles: true}));
+                                sel.dispatchEvent(new Event('change', {bubbles: true}));
+                                return true;
+                            }""",
+                            [pref_label, card.state, f"{pref_label} {card.state}", f"{pref_label} — {card.state}"],
+                        )
+                else:
+                    try:
+                        await state_el.click(timeout=1500)
                     except Exception:
                         pass
-            else:
-                await state_el.fill(card.state, timeout=3000)
-    except Exception:
-        pass
+                    try:
+                        await state_el.fill("", timeout=1500)
+                        await state_el.fill(pref_label, timeout=3000)
+                    except Exception:
+                        try:
+                            await page.keyboard.type(pref_label, delay=30)
+                        except Exception:
+                            pass
+                    picked_combo = False
+                    for key in [pref_label, card.state]:
+                        if not key:
+                            continue
+                        option_selectors = [
+                            f'[role="option"]:has-text("{key}")',
+                            f'li:has-text("{key}")',
+                            f'div[role="option"]:has-text("{key}")',
+                        ]
+                        for sel in option_selectors:
+                            try:
+                                opt = page.locator(sel).first
+                                if await opt.is_visible(timeout=1200):
+                                    await opt.click(timeout=2000)
+                                    picked_combo = True
+                                    break
+                            except Exception:
+                                continue
+                        if picked_combo:
+                            break
+                    try:
+                        await page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            pref_verified, verify_reason = await _verify_prefecture_selected(pref_label, card.state)
+            if not pref_verified:
+                pref_verified = await _pick_prefecture_by_role()
+                if pref_verified:
+                    await page.wait_for_timeout(300)
+                pref_verified2, verify_reason2 = await _verify_prefecture_selected(pref_label, card.state)
+                log(
+                    f"[Stripe][JP] pref step2 role: attempted={pref_verified} "
+                    f"committed={pref_verified2} reason={verify_reason2}"
+                )
+                pref_verified = pref_verified2
+                verify_reason = verify_reason2
+            if not pref_verified:
+                pref_verified = await _pick_prefecture_by_label_api()
+                if pref_verified:
+                    await page.wait_for_timeout(280)
+                pref_verified2, verify_reason2 = await _verify_prefecture_selected(pref_label, card.state)
+                log(
+                    f"[Stripe][JP] pref step2b label: attempted={pref_verified} "
+                    f"committed={pref_verified2} reason={verify_reason2}"
+                )
+                pref_verified = pref_verified2
+                verify_reason = verify_reason2
+            if not pref_verified:
+                pref_verified = await _pick_prefecture_by_tab_fallback()
+                if pref_verified:
+                    await page.wait_for_timeout(300)
+                pref_verified2, verify_reason2 = await _verify_prefecture_selected(pref_label, card.state)
+                log(
+                    f"[Stripe][JP] pref step3 tab: attempted={pref_verified} "
+                    f"committed={pref_verified2} reason={verify_reason2}"
+                )
+                pref_verified = pref_verified2
+                verify_reason = verify_reason2
+            if not pref_verified:
+                log(
+                    f"[Stripe] ⚠️ 日本地址都道府县未命中: state={card.state}, label={pref_label}, "
+                    f"verify_reason={verify_reason}"
+                )
+        except Exception:
+            pass
+
+    else:
+        # 美区等旧流程
+        for selector, value in [
+            ('#billingAddressLine1, input[name*="addressLine1" i], input[name*="address" i], input[placeholder*="地址" i], input[placeholder*="Address" i]', card.street),
+            ('#billingLocality, input[name*="locality" i], input[name*="city" i], input[placeholder*="城市" i], input[placeholder*="City" i]', city_value),
+            ('#billingPostalCode, input[name*="postalCode" i], input[name*="zip" i], input[placeholder*="邮编" i], input[placeholder*="ZIP" i]', zip_value),
+        ]:
+            await _safe_fill(selector, value)
+
+        # State - 尝试多种方式匹配
+        try:
+            state_el = page.locator('#billingAdministrativeArea, select[name*="state" i]').first
+            if await state_el.is_visible(timeout=3000):
+                tag = await state_el.evaluate("el => el.tagName.toLowerCase()")
+                if tag == "select":
+                    try:
+                        await state_el.select_option(value=card.state, timeout=3000)
+                    except Exception:
+                        # 尝试用全称
+                        state_names = {
+                            "MN": "Minnesota", "TN": "Tennessee", "CA": "California",
+                            "TX": "Texas", "NY": "New York", "FL": "Florida",
+                            "IL": "Illinois", "PA": "Pennsylvania", "OH": "Ohio",
+                            "GA": "Georgia", "NC": "North Carolina", "MI": "Michigan",
+                            "NJ": "New Jersey", "VA": "Virginia", "WA": "Washington",
+                            "AZ": "Arizona", "MA": "Massachusetts", "IN": "Indiana",
+                            "MO": "Missouri", "MD": "Maryland", "WI": "Wisconsin",
+                            "CO": "Colorado", "SC": "South Carolina", "AL": "Alabama",
+                            "LA": "Louisiana", "KY": "Kentucky", "OR": "Oregon",
+                            "OK": "Oklahoma", "CT": "Connecticut", "IA": "Iowa",
+                            "MS": "Mississippi", "AR": "Arkansas", "KS": "Kansas",
+                            "NV": "Nevada", "UT": "Utah", "NE": "Nebraska",
+                            "NM": "New Mexico", "WV": "West Virginia", "ID": "Idaho",
+                            "HI": "Hawaii", "ME": "Maine", "NH": "New Hampshire",
+                            "RI": "Rhode Island", "MT": "Montana", "DE": "Delaware",
+                            "SD": "South Dakota", "ND": "North Dakota", "AK": "Alaska",
+                            "VT": "Vermont", "WY": "Wyoming", "DC": "District of Columbia",
+                        }
+                        full_name = state_names.get(card.state, card.state)
+                        try:
+                            await state_el.select_option(label=full_name, timeout=3000)
+                        except Exception:
+                            pass
+                else:
+                    await state_el.fill(card.state, timeout=3000)
+        except Exception:
+            pass
 
     # 勾选条款
     try:
@@ -448,7 +1440,16 @@ async def fill_stripe(page, email: str, card: CardInfo) -> None:
     await page.wait_for_timeout(3000)
 
 
-async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal_password: str, proxy: str | None = None) -> None:
+async def fill_paypal(
+    page,
+    email: str,
+    card: CardInfo,
+    phone: PhoneInfo,
+    paypal_password: str,
+    proxy: str | None = None,
+    *,
+    country_code: str = "US",
+) -> None:
     """PayPal 页面：注册 + 绑卡。"""
     await page.wait_for_timeout(5000)
 
@@ -526,7 +1527,10 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
 
     await page.wait_for_timeout(2000)
 
-    # 第二步：进入注册表单后，先切国家到 US
+    desired_country = "JP" if str(country_code or "").upper() == "JP" else "US"
+    desired_labels = ["Japan", "日本"] if desired_country == "JP" else ["United States", "美国"]
+
+    # 第二步：进入注册表单后，先切国家
     # 等待国家下拉框出现并可交互
     log("[PayPal] 等待国家选择框加载...")
     try:
@@ -535,31 +1539,58 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
         pass
     await page.wait_for_timeout(2000)
 
-    log("[PayPal] 切换国家到 United States...")
-    # 使用 select_option 而非直接设置 value，确保触发完整的 change 事件链
-    country_switched = False
-    try:
-        country_sel = page.locator('select[name*="country" i], select[id*="country" i]').first
-        if await country_sel.is_visible(timeout=3000):
-            await country_sel.select_option("US", timeout=5000)
-            country_switched = True
-    except Exception:
-        pass
+    async def _switch_paypal_country(target_country: str, labels: list[str]) -> bool:
+        # 先尝试 select_option（值 / 文本）
+        try:
+            country_sel = page.locator('select[name*="country" i], select[id*="country" i]').first
+            if await country_sel.is_visible(timeout=2000):
+                try:
+                    await country_sel.select_option(target_country, timeout=2500)
+                    return True
+                except Exception:
+                    pass
+                for lbl in labels:
+                    try:
+                        await country_sel.select_option(label=lbl, timeout=2500)
+                        return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
-    if not country_switched:
-        # 备用方案：遍历所有 select 找到国家下拉
-        await page.evaluate("""() => {
+        # 兜底：遍历所有 select，按 value 或 option 文本匹配国家
+        result = await page.evaluate("""(targetCountry, labels) => {
+            const keys = (labels || []).map(x => String(x || '').toLowerCase()).filter(Boolean);
             const selects = Array.from(document.querySelectorAll('select'));
-            for (const sel of selects) {
-                const opt = Array.from(sel.options).find(o => o.value === 'US');
-                if (opt && (sel.name.toLowerCase().includes('country') || sel.id.toLowerCase().includes('country') || sel.options.length > 50)) {
-                    sel.value = 'US';
-                    sel.dispatchEvent(new Event('input', {bubbles: true}));
-                    sel.dispatchEvent(new Event('change', {bubbles: true}));
-                    break;
+            const candidates = selects.filter((sel) => {
+                const name = String(sel.name || '').toLowerCase();
+                const id = String(sel.id || '').toLowerCase();
+                return name.includes('country') || id.includes('country') || sel.options.length > 50;
+            });
+            for (const sel of candidates) {
+                const opts = Array.from(sel.options || []);
+                let hit = opts.find(o => String(o.value || '').toUpperCase() === String(targetCountry || '').toUpperCase());
+                if (!hit) {
+                    hit = opts.find(o => {
+                        const t = String(o.text || o.label || '').toLowerCase();
+                        return keys.some(k => t.includes(k));
+                    });
                 }
+                if (!hit) continue;
+                sel.value = String(hit.value || '');
+                sel.dispatchEvent(new Event('input', {bubbles: true}));
+                sel.dispatchEvent(new Event('change', {bubbles: true}));
+                const text = String(hit.text || hit.label || '').trim();
+                return {ok: true, value: sel.value || '', text};
             }
-        }""")
+            return {ok: false, value: '', text: ''};
+        }""", target_country, labels)
+        return bool((result or {}).get("ok"))
+
+    log(f"[PayPal] 切换国家到 {desired_country} ...")
+    country_switched = await _switch_paypal_country(desired_country, desired_labels)
+    if not country_switched:
+        log("[PayPal] ⚠️ 国家切换首轮未命中，将继续进入复检重试")
 
     # 国家切换后页面会重新渲染表单字段，必须等待足够时间
     log("[PayPal] 等待页面根据新国家重新加载表单...")
@@ -576,33 +1607,27 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
         const selects = Array.from(document.querySelectorAll('select'));
         for (const sel of selects) {
             if (sel.name.toLowerCase().includes('country') || sel.id.toLowerCase().includes('country') || sel.options.length > 50) {
-                return sel.value;
+                const idx = sel.selectedIndex || 0;
+                const opt = sel.options && sel.options[idx];
+                const text = opt ? String(opt.text || opt.label || '').trim() : '';
+                return { value: sel.value || '', text };
             }
         }
-        return '';
+        return { value: '', text: '' };
     }""")
-    if current_country != "US":
-        log(f"[PayPal] ⚠️ 国家仍为 {current_country}，再次尝试切换...")
-        try:
-            country_sel = page.locator('select[name*="country" i], select[id*="country" i]').first
-            await country_sel.select_option("US", timeout=5000)
-            await page.wait_for_timeout(5000)
-        except Exception:
-            await page.evaluate("""() => {
-                const selects = Array.from(document.querySelectorAll('select'));
-                for (const sel of selects) {
-                    const opt = Array.from(sel.options).find(o => o.value === 'US');
-                    if (opt && (sel.name.toLowerCase().includes('country') || sel.id.toLowerCase().includes('country') || sel.options.length > 50)) {
-                        sel.value = 'US';
-                        sel.dispatchEvent(new Event('input', {bubbles: true}));
-                        sel.dispatchEvent(new Event('change', {bubbles: true}));
-                        break;
-                    }
-                }
-            }""")
-            await page.wait_for_timeout(5000)
+    current_value = str((current_country or {}).get("value") or "")
+    current_text = str((current_country or {}).get("text") or "").strip().lower()
+    if desired_country == "JP":
+        country_ok = current_value.upper() == "JP" or ("japan" in current_text) or ("日本" in current_text)
     else:
-        log("[PayPal] ✓ 国家已确认切换为 US")
+        country_ok = current_value.upper() == "US" or ("united states" in current_text) or ("美国" in current_text)
+
+    if not country_ok:
+        log(f"[PayPal] ⚠️ 国家仍为 value={current_value}, text={current_text}，再次尝试切换到 {desired_country}...")
+        await _switch_paypal_country(desired_country, desired_labels)
+        await page.wait_for_timeout(5000)
+    else:
+        log(f"[PayPal] ✓ 国家已确认切换为 {desired_country} (value={current_value}, text={current_text})")
 
     # 再次确认邮箱（国家切换后页面可能重置了邮箱字段）
     try:
@@ -659,13 +1684,18 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
     # 地址（先清空再填写，避免残留旧值）
     # PayPal 页面字段可能用 placeholder 而非 name 属性，需要多种选择器兜底
     log("[PayPal] 填写地址信息...")
+    jp_birth, jp_first_kana, jp_last_kana, jp_first_kanji, jp_last_kanji = _jp_identity_values(card, email)
+    jp_first_kata = _hiragana_to_katakana(jp_first_kana)
+    jp_last_kata = _hiragana_to_katakana(jp_last_kana)
+    first_name_value = jp_first_kata if desired_country == "JP" else card.first_name
+    last_name_value = jp_last_kata if desired_country == "JP" else card.last_name
 
     # First name
     try:
         loc = page.locator('input[name="fname"], input[id*="first" i], input[placeholder*="First" i], input[autocomplete="given-name"]').first
         if await loc.is_visible(timeout=2000):
             await loc.fill("", timeout=2000)
-            await loc.fill(card.first_name, timeout=5000)
+            await loc.fill(first_name_value, timeout=5000)
     except Exception:
         pass
     await page.wait_for_timeout(300)
@@ -675,7 +1705,7 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
         loc = page.locator('input[name="lname"], input[id*="last" i], input[placeholder*="Last" i], input[autocomplete="family-name"]').first
         if await loc.is_visible(timeout=2000):
             await loc.fill("", timeout=2000)
-            await loc.fill(card.last_name, timeout=5000)
+            await loc.fill(last_name_value, timeout=5000)
     except Exception:
         pass
     await page.wait_for_timeout(300)
@@ -780,26 +1810,131 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
         pass
     await page.wait_for_timeout(300)
 
-    # State（可能是 select 下拉或 input 输入框）
-    try:
-        state_sel = page.locator('select[name="state"], select[name*="state" i], select[autocomplete="address-level1"], select[aria-label*="State" i]').first
-        if await state_sel.is_visible(timeout=3000):
-            try:
-                await state_sel.select_option(value=card.state, timeout=5000)
-            except Exception:
-                # 尝试用 label 匹配
+    async def _fill_paypal_jp_prefecture() -> tuple[bool, str]:
+        pref_label = _JP_PREFECTURE_LABELS.get(card.state, card.state)
+        pref_code = _JP_PAYPAL_PREFECTURE_CODES.get(card.state, "")
+        pref_keys = [pref_label, card.state, pref_code]
+        pref_keys = [x for x in pref_keys if x]
+
+        # 1) 原生 select_option
+        try:
+            sel = page.locator(
+                '#state, #province, '
+                'select[name="state"], select[name*="state" i], select[name*="prefecture" i], '
+                'select[name*="region" i], select[name*="province" i], '
+                'select[id*="state" i], select[id*="prefecture" i], select[id*="region" i], select[id*="province" i], '
+                'select[autocomplete="address-level1"], select[aria-label*="都道府県"], select[aria-label*="Prefecture" i]'
+            ).first
+            if await sel.is_visible(timeout=1400):
+                for key in pref_keys:
+                    try:
+                        await sel.select_option(value=key, timeout=1500)
+                        return True, f"select:value:{key}"
+                    except Exception:
+                        pass
+                    try:
+                        await sel.select_option(label=key, timeout=1500)
+                        return True, f"select:label:{key}"
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # 2) 组合下拉（都道府県）
+        try:
+            result = await page.evaluate(
+                """(payload) => {
+                    const keys = (payload.keys || []).map(x => String(x || '').trim()).filter(Boolean);
+                    const keysN = keys.map(x => x.toLowerCase().replace(/[\\s\\-ー—‐－]/g, ''));
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (r.width < 8 || r.height < 8) return false;
+                        const st = window.getComputedStyle(el);
+                        if (!st) return false;
+                        return st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+                    };
+                    const norm = (s) => String(s || '').toLowerCase().replace(/[\\s\\-ー—‐－]/g, '');
+                    const textOf = (el) => String(el?.innerText || el?.textContent || '').trim();
+                    const hasKey = (s) => {
+                        const t = norm(s);
+                        return keysN.some(k => t.includes(k));
+                    };
+                    const clickEl = (el) => {
+                        if (!el) return false;
+                        try { el.click(); return true; } catch {}
+                        return false;
+                    };
+
+                    const controls = Array.from(document.querySelectorAll(
+                        'select,input,button,[role="combobox"],[aria-haspopup="listbox"],div'
+                    )).filter(isVisible).filter(el => {
+                        const hint = [
+                            el.id || '', el.name || '', el.getAttribute('aria-label') || '',
+                            el.getAttribute('placeholder') || '', el.getAttribute('data-testid') || '', textOf(el),
+                        ].join(' ').toLowerCase();
+                        return /都道府県|prefecture|state|province|region|administrative/.test(hint);
+                    });
+                    if (!controls.length) return { ok: false, reason: 'no_control' };
+
+                    for (const ctl of controls) {
+                        const tag = String(ctl.tagName || '').toLowerCase();
+                        if (tag === 'select') {
+                            const opts = Array.from(ctl.options || []);
+                            let hit = opts.find(o => hasKey(o.value || ''));
+                            if (!hit) hit = opts.find(o => hasKey(o.text || o.label || ''));
+                            if (!hit) continue;
+                            ctl.value = String(hit.value || '');
+                            ctl.dispatchEvent(new Event('input', { bubbles: true }));
+                            ctl.dispatchEvent(new Event('change', { bubbles: true }));
+                            return { ok: true, reason: 'select_set' };
+                        }
+
+                        clickEl(ctl);
+                        const options = Array.from(document.querySelectorAll(
+                            '[role="option"], [role="listbox"] li, li[role="option"], div[role="option"], ul li, button'
+                        )).filter(isVisible).filter(el => {
+                            const t = textOf(el);
+                            if (!t || t.length > 40) return false;
+                            return hasKey(t);
+                        });
+                        if (options.length) {
+                            clickEl(options[0]);
+                            return { ok: true, reason: 'option_click' };
+                        }
+                    }
+                    return { ok: false, reason: 'no_option' };
+                }""",
+                {"keys": pref_keys},
+            )
+            if bool((result or {}).get("ok")):
+                return True, str((result or {}).get("reason") or "combo_ok")
+            return False, str((result or {}).get("reason") or "combo_fail")
+        except Exception as exc:
+            return False, f"exception:{exc}"
+
+    # State/Prefecture（JP 下优先填都道府県）
+    if desired_country == "JP":
+        ok, why = await _fill_paypal_jp_prefecture()
+        log(f"[PayPal][JP] 都道府県填充: ok={ok} reason={why} target={_JP_PREFECTURE_LABELS.get(card.state, card.state)}")
+    else:
+        try:
+            state_sel = page.locator('select[name="state"], select[name*="state" i], select[autocomplete="address-level1"], select[aria-label*="State" i]').first
+            if await state_sel.is_visible(timeout=3000):
                 try:
-                    await state_sel.select_option(label=card.state, timeout=3000)
+                    await state_sel.select_option(value=card.state, timeout=5000)
                 except Exception:
-                    pass
-        else:
-            # State 可能是 input 而非 select
-            state_input = page.locator('input[name*="state" i], input[placeholder*="State" i], input[autocomplete="address-level1"]').first
-            if await state_input.is_visible(timeout=2000):
-                await state_input.fill("", timeout=2000)
-                await state_input.fill(card.state, timeout=5000)
-    except Exception:
-        pass
+                    try:
+                        await state_sel.select_option(label=card.state, timeout=3000)
+                    except Exception:
+                        pass
+            else:
+                state_input = page.locator('input[name*="state" i], input[placeholder*="State" i], input[autocomplete="address-level1"]').first
+                if await state_input.is_visible(timeout=2000):
+                    await state_input.fill("", timeout=2000)
+                    await state_input.fill(card.state, timeout=5000)
+        except Exception:
+            pass
     await page.wait_for_timeout(500)
 
     # 密码
@@ -811,6 +1946,65 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
     except Exception:
         pass
     await page.wait_for_timeout(1000)
+
+    # 日本实名页会额外要求生日 + かな + 漢字姓名
+    if desired_country == "JP":
+        await _fill_paypal_jp_identity(page, email=email, card=card)
+        await page.wait_for_timeout(600)
+        # 日本页经常要求“名/姓”为假名；若页面报错则强制改写一次
+        try:
+            kana_name_invalid = await page.evaluate("""() => {
+                const text = (document.body?.innerText || '');
+                return /ひらがなまたはカタカナ/.test(text);
+            }""")
+            if kana_name_invalid:
+                log("[PayPal][JP] 检测到姓名假名校验错误，强制重填 名/姓 为假名")
+                await page.evaluate(
+                    """(payload) => {
+                        const first = String(payload.first || '');
+                        const last = String(payload.last || '');
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 8 || r.height < 8) return false;
+                            const st = window.getComputedStyle(el);
+                            if (!st) return false;
+                            return st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+                        };
+                        const setVal = (el, v) => {
+                            if (!el) return false;
+                            const proto = HTMLInputElement.prototype;
+                            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                            if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+                            else el.value = v;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.dispatchEvent(new Event('blur', { bubbles: true }));
+                            return true;
+                        };
+                        const sig = (el) => {
+                            const p = String(el.placeholder || '').toLowerCase();
+                            const a = String(el.getAttribute('aria-label') || '').toLowerCase();
+                            const n = String(el.name || '').toLowerCase();
+                            const i = String(el.id || '').toLowerCase();
+                            const t = String(el.closest('label')?.innerText || el.parentElement?.innerText || '').toLowerCase();
+                            return `${p} ${a} ${n} ${i} ${t}`;
+                        };
+                        const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+                        let firstDone = false;
+                        let lastDone = false;
+                        for (const el of inputs) {
+                            const s = sig(el);
+                            if (!firstDone && /(\\b名\\b|first|given)/.test(s)) firstDone = setVal(el, first) || firstDone;
+                            if (!lastDone && /(\\b姓\\b|last|family)/.test(s)) lastDone = setVal(el, last) || lastDone;
+                        }
+                        return { firstDone, lastDone };
+                    }""",
+                    {"first": jp_first_kata, "last": jp_last_kata},
+                )
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
 
     # 最终检查：确认所有关键字段已填写
     log("[PayPal] 检查表单完整性...")
@@ -824,6 +2018,7 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
             {name: 'street', selectors: 'input[name*="street" i], input[name*="address" i], input[autocomplete="address-line1"], input[placeholder*="Street" i]'},
             {name: 'city', selectors: 'input[name="city"], input[name*="city" i], input[autocomplete="address-level2"], input[placeholder*="City" i]'},
             {name: 'zip', selectors: 'input[name*="zip" i], input[name*="postal" i], input[autocomplete="postal-code"], input[placeholder*="ZIP" i]'},
+            {name: 'prefecture', selectors: 'select[name*="state" i], select[name*="prefecture" i], select[name*="region" i], input[name*="state" i], input[aria-label*="都道府県"], [role="combobox"][aria-label*="都道府県"]'},
         ];
         const empty = [];
         for (const {name, selectors} of checks) {
@@ -888,6 +2083,12 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
             try:
                 loc = page.locator('input[placeholder*="City" i], input[name*="city" i]').first
                 await loc.fill(card.city, timeout=3000)
+            except Exception:
+                pass
+        if "prefecture" in empty_fields and desired_country == "JP":
+            try:
+                ok, why = await _fill_paypal_jp_prefecture()
+                log(f"[PayPal][JP] 都道府県补填: ok={ok} reason={why}")
             except Exception:
                 pass
         await page.wait_for_timeout(1000)
@@ -990,6 +2191,7 @@ async def fill_paypal(page, email: str, card: CardInfo, phone: PhoneInfo, paypal
                 int(time.time() * 1000) + regen_idx + random.randint(1, 9999),
                 email,
                 env,
+                region_mode="jp" if str(country_code or "").upper() == "JP" else "default",
             )
             log(f"[PayPal] 检测到卡被拒，自动生成新卡重试 ({regen_idx + 1}/{max_regen})")
             working_card = new_card
@@ -1453,6 +2655,11 @@ async def _is_paypal_verification_stage(page) -> bool:
             "text message",
             "sms code",
             "验证码",
+            "認証コード",
+            "コードを入力",
+            "コードを入力する",
+            "送信しました",
+            "再送",
         )
         if any(m in low for m in markers):
             return True
@@ -2017,12 +3224,12 @@ async def fill_sms_code(
     solver_proxy: str | None = None,
     *,
     prefix: str = "[PayPal]",
-) -> None:
+) -> bool:
     """等待并填入 PayPal 手机验证码（复刻 source4 逻辑）。"""
     await page.wait_for_timeout(800)
-    body = await page.locator("body").inner_text(timeout=5000)
-    if "code" not in body.lower() and "验证" not in body:
-        return
+    if not await _is_paypal_verification_stage(page):
+        log(f"{prefix} 未检测到短信验证码页，跳过自动填码")
+        return False
 
     # 二次风控常发生在短信页刚加载时，先做一次预处理。
     has_captcha_pre, reason_pre = await _detect_captcha_signal(page)
@@ -2061,6 +3268,8 @@ async def fill_sms_code(
                     await page.wait_for_timeout(200)
                 typed = True
                 break
+    if not typed:
+        raise RuntimeError("短信验证码输入失败：未找到可填写的 OTP 输入框")
 
     # 快速路径：验证码写入后先短暂等待，尽快进入提交/确认点击
     await page.wait_for_timeout(500)
@@ -2089,6 +3298,13 @@ async def fill_sms_code(
 
     # 提交后立刻尝试点击确认，缩短“收到验证码 -> 点击 Agree and Continue”耗时。
     await _click_paypal_agree_and_continue_if_present(page, solver_proxy=solver_proxy, prefix=prefix)
+    await page.wait_for_timeout(900)
+    still_verify = await _is_paypal_verification_stage(page)
+    if still_verify:
+        log(f"{prefix} 短信验证码阶段仍在，判定未完成提交")
+        return False
+    log(f"{prefix} 短信验证码已提交并通过")
+    return True
 
 
 async def check_phone_rejected(page) -> bool:
@@ -2116,6 +3332,9 @@ async def _click_paypal_agree_and_continue_if_present(
 ) -> bool:
     """若出现 PayPal review 页的 Agree and Continue，则自动点击。"""
     selectors = [
+        'button:has-text("同意して続行")',
+        'button:has-text("同意して続ける")',
+        'button:has-text("続行")',
         'button:has-text("Agree and Continue")',
         'button:has-text("Agree & Continue")',
         'button:has-text("同意并继续")',
@@ -2146,6 +3365,35 @@ async def _click_paypal_agree_and_continue_if_present(
                 return True
         except Exception:
             continue
+    # JS 文本兜底：处理包裹在 span/div 的日语大蓝按钮
+    try:
+        js_clicked = await page.evaluate(
+            """() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 20 || r.height < 20) return false;
+                    const st = window.getComputedStyle(el);
+                    if (!st) return false;
+                    return st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity || '1') > 0.05;
+                };
+                const textOf = (el) => String(el?.innerText || el?.textContent || '').trim();
+                const targets = Array.from(document.querySelectorAll('button, a, div[role="button"], span'))
+                    .filter(isVisible);
+                const hit = targets.find(el => /同意して続行|同意して続ける|Agree\\s*&?\\s*Continue/i.test(textOf(el)));
+                if (!hit) return false;
+                const btn = hit.closest('button, a, div[role="button"]') || hit;
+                btn.scrollIntoView({block: 'center'});
+                btn.click();
+                return true;
+            }"""
+        )
+        if js_clicked:
+            log(f"{prefix} 已点击支付确认按钮: js_fallback_jp_agree")
+            await page.wait_for_timeout(1500)
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -2157,6 +3405,7 @@ async def pay_one(
     worker_id: int = 1,
     max_phone_retries: int = 3,
     proxy: str | None = None,
+    flow2_region_mode: str = "default",
 ) -> bool:
     """执行一次 PayPal 支付。"""
     email = item["email"]
@@ -2164,6 +3413,8 @@ async def pay_one(
     payment_link = item["payment_link"]
     prefix = f"[paypal-pay-{worker_id:02d}][{email}]"
     paypal_password = generate_paypal_password(email)
+    region_mode = _normalize_flow2_region_mode(flow2_region_mode)
+    billing_country = _billing_country_code(region_mode)
 
     browser_cfg = cfg.get("browser", {})
     profile_dir = resolve_path("profiles") / f"paypal_pay_{safe_filename(email)}"
@@ -2182,6 +3433,16 @@ async def pay_one(
 
     phone: PhoneInfo | None = None
     try:
+        flow_env = load_env(".env")
+        working_card = card
+        if region_mode == "jp":
+            jp_billing = _generate_local_random_card(worker_id, email, flow_env, region_mode="jp")
+            working_card = _with_billing_profile(card, jp_billing)
+            log(
+                f"{prefix} 日本代理模式: 使用日本账单地址 "
+                f"{working_card.city}, {working_card.state}, {working_card.zip_code}"
+            )
+
         await session.__aenter__()
         page = await session.current_page()
 
@@ -2198,7 +3459,7 @@ async def pay_one(
 
         # Stripe
         log(f"{prefix} Stripe 填充...")
-        await fill_stripe(page, email, card)
+        await fill_stripe(page, email, working_card, country_code=billing_country)
 
         # PayPal - 可能需要换手机号重试
         for attempt in range(1, max_phone_retries + 1):
@@ -2207,7 +3468,15 @@ async def pay_one(
                 raise RuntimeError("手机号池已耗尽")
             log(f"{prefix} PayPal 注册 (手机: {phone.number}, 尝试 {attempt}/{max_phone_retries})...")
 
-            await fill_paypal(page, email, card, phone, paypal_password, proxy=proxy)
+            await fill_paypal(
+                page,
+                email,
+                working_card,
+                phone,
+                paypal_password,
+                proxy=proxy,
+                country_code=billing_country,
+            )
 
             # 检查手机号是否被拒
             await page.wait_for_timeout(1200)
@@ -2235,7 +3504,11 @@ async def pay_one(
 
             # 验证码
             log(f"{prefix} 等待验证码...")
-            await fill_sms_code(page, phone.api_url, solver_proxy=proxy)
+            sms_done = await fill_sms_code(page, phone.api_url, solver_proxy=proxy, prefix=prefix)
+            if not sms_done:
+                if await _is_paypal_verification_stage(page):
+                    raise RuntimeError("短信验证码未完成，停止后续支付等待")
+                log(f"{prefix} 当前未处于短信验证码页，继续后续流程")
             await _click_paypal_agree_and_continue_if_present(page, solver_proxy=proxy, prefix=prefix)
             phone_pool.release(phone.number, success=True)
             break
@@ -2249,6 +3522,9 @@ async def pay_one(
                 break
             if "paypal.com" in page.url and i % 2 == 0:
                 await _click_paypal_agree_and_continue_if_present(page, solver_proxy=proxy, prefix=prefix)
+            # review 页额外强制点击一次（该页常停留在“同意して続行”）
+            if "paypal.com/webapps/hermes" in page.url and "billingweb/review" in page.url:
+                await _click_paypal_agree_and_continue_if_present(page, solver_proxy=proxy, prefix=prefix)
             await page.wait_for_timeout(1000)
 
         final_url = page.url
@@ -2259,9 +3535,9 @@ async def pay_one(
             return True
         else:
             log(f"{prefix} ⚠️ 最终 URL: {final_url}")
-            save_pending_auth(email, query_code)
-            remove_from_link_pool(email)
-            return True
+            if "paypal.com/webapps/hermes" in final_url and "billingweb/review" in final_url:
+                raise RuntimeError("仍停留在 PayPal review 页（同意并继续未完成）")
+            raise RuntimeError("支付流程未返回成功页面")
 
     except Exception as exc:
         log(f"{prefix} ❌ 失败: {exc}")
@@ -2278,10 +3554,12 @@ async def run_paypal_pay(
     count: int = 1,
     workers: int = 1,
     card_source_mode: str | None = None,
+    flow2_region_mode: str | None = None,
 ) -> int:
     """批量执行流程2。返回成功数。"""
     log(f"PayPal flow2 code version: {PAYPAL_FLOW2_CODE_VERSION} file={Path(__file__).resolve()}")
     env = load_env(".env")
+    resolved_region_mode = _normalize_flow2_region_mode(flow2_region_mode)
     pool = load_link_pool()
     if not pool:
         log("PayPal 流程2：长链接池为空，请先运行流程1")
@@ -2301,15 +3579,29 @@ async def run_paypal_pay(
 
     # 代理池（通过 PAYPAL_USE_PROXY 开关控制）
     from .proxy_pool import ProxyPool
-    use_proxy = (env.get("PAYPAL_USE_PROXY") or "").strip().lower() in ("true", "1", "yes")
+    if resolved_region_mode == "jp":
+        use_proxy = True
+    else:
+        use_proxy = (env.get("PAYPAL_USE_PROXY") or "").strip().lower() in ("true", "1", "yes")
     proxy_pool: ProxyPool | None = None
     if use_proxy:
-        proxy_file = env.get("PAYPAL_PROXY_FILE") or env.get("PROXY_FILE") or "data/proxies/proxies.txt"
+        if resolved_region_mode == "jp":
+            proxy_file = (
+                env.get("PAYPAL_PROXY_FILE_JP")
+                or env.get("PAYPAL_PROXY_FILE")
+                or env.get("PROXY_FILE")
+                or "data/proxies/proxies_jp.txt"
+            )
+        else:
+            proxy_file = env.get("PAYPAL_PROXY_FILE") or env.get("PROXY_FILE") or "data/proxies/proxies.txt"
         proxy_pool = ProxyPool(proxy_file)
         if proxy_pool.count() <= 0:
             log(f"PayPal 流程2：PAYPAL_USE_PROXY 已开启但代理池为空: {proxy_file}")
             return 0
-        log(f"PayPal 流程2：代理已启用，代理数={proxy_pool.count()}")
+        if resolved_region_mode == "jp":
+            log(f"PayPal 流程2：日本代理模式已启用，代理池={proxy_file}，代理数={proxy_pool.count()}")
+        else:
+            log(f"PayPal 流程2：代理已启用，代理数={proxy_pool.count()}")
 
     if not local_random_mode:
         desired_cards = min(count, len(pool), phone_pool.count())
@@ -2339,14 +3631,23 @@ async def run_paypal_pay(
         nonlocal success
         async with sem:
             if local_random_mode:
-                card = _generate_local_random_card(index, item["email"], env)
+                card = _generate_local_random_card(index, item["email"], env, region_mode=resolved_region_mode)
             else:
                 card = card_pool.take_one()
                 if not card:
                     log(f"[paypal-pay-{index:02d}] 卡池已空")
                     return
             proxy = proxy_pool.pick(index) if proxy_pool else None
-            ok = await pay_one(item, card, phone_pool, cfg, worker_id=index, max_phone_retries=max_retries, proxy=proxy)
+            ok = await pay_one(
+                item,
+                card,
+                phone_pool,
+                cfg,
+                worker_id=index,
+                max_phone_retries=max_retries,
+                proxy=proxy,
+                flow2_region_mode=resolved_region_mode,
+            )
             if ok and not local_random_mode:
                 card_pool.remove(card)
             if ok:

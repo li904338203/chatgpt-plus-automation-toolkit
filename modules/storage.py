@@ -61,6 +61,17 @@ def _external_imap163_domain() -> str:
     return domain
 
 
+def _is_external_imap163_email(email: str) -> bool:
+    target = (email or "").strip().lower()
+    if not target or "@" not in target:
+        return False
+    configured = _external_imap163_domain()
+    if configured and target.endswith(f"@{configured}"):
+        return True
+    # 固定兜底，避免历史环境变量缺失导致 domain163 账号被误判。
+    return target.endswith("@edu.hanyiz2.com")
+
+
 def _generate_external_imap163_account() -> MailAccount | None:
     domain = _external_imap163_domain()
     if not domain:
@@ -107,6 +118,11 @@ def parse_mail_line(line: str) -> MailAccount | None:
         )
     if len(parts) >= 3 and parts[2].startswith(("http://", "https://")):
         return MailAccount(email=email, password=parts[1] or None, mail_url=parts[2], raw=line)
+    if len(parts) >= 2 and parts[1].strip().lower() == "imap163":
+        return MailAccount(email=email, mail_url="imap163", raw=line)
+    if len(parts) >= 2 and parts[1].strip().lower() == email.lower() and _is_external_imap163_email(email):
+        # 兼容历史错误格式: email----email，应按 imap163 处理。
+        return MailAccount(email=email, mail_url="imap163", raw=line)
     if mail_url:
         return MailAccount(email=email, mail_url=mail_url, raw=line)
     if len(parts) >= 2 and parts[1].startswith(("http://", "https://")):

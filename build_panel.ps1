@@ -156,7 +156,11 @@ foreach ($file in $RuntimeStateFiles) {
 }
 
 $buildIncludeEnv = [string]$env:BUILD_INCLUDE_PLAYWRIGHT_BROWSERS
-$IncludePlaywrightBrowsers = ($buildIncludeEnv.Trim().ToLower() -in @("1", "true", "yes"))
+if ([string]::IsNullOrWhiteSpace($buildIncludeEnv)) {
+    $IncludePlaywrightBrowsers = $true
+} else {
+    $IncludePlaywrightBrowsers = ($buildIncludeEnv.Trim().ToLower() -in @("1", "true", "yes"))
+}
 if ($IncludePlaywrightBrowsers) {
     $PlaywrightSource = Join-Path $env:LOCALAPPDATA "ms-playwright"
     $PlaywrightTarget = Join-Path $DistRoot "_internal\playwright\driver\package\.local-browsers"

@@ -26,6 +26,7 @@ from .utils import load_env, log, now_utc, resolve_path, safe_filename
 PAYPAL_OUTPUT_ROOT = resolve_path("output/paypal注册")
 LINK_POOL_DIR = PAYPAL_OUTPUT_ROOT / "长链接账号"
 LINK_POOL_FILE = LINK_POOL_DIR / "account.txt"
+DOMAIN163_USED_FILE = PAYPAL_OUTPUT_ROOT / "domain163_used.txt"
 PAYPAL_SESSIOND_DIR = PAYPAL_OUTPUT_ROOT / "sessiond"
 PAYPAL_SESSION_CACHE_FILE = PAYPAL_SESSIOND_DIR / "session_cache.jsonl"
 ICLOUD_DEFAULT_FILE = resolve_path("data/paypal/icloud_accounts.txt")
@@ -48,19 +49,27 @@ def _is_network_navigation_error(exc: Exception) -> bool:
 
 
 def _probe_proxy(proxy: str, timeout_sec: int = 12) -> tuple[bool, str]:
-    try:
-        with httpx.Client(proxy=proxy, timeout=timeout_sec, follow_redirects=False) as c:
-            r = c.get("http://example.com")
-            if r.status_code == 200:
-                return True, "ok"
-            body = (r.text or "").strip()
-            if r.status_code == 403:
-                m = re.search(r"forbidden ip=([0-9.]+)", body, flags=re.I)
-                if m:
-                    return False, f"403 forbidden: source ip {m.group(1)} not supported by proxy provider"
-            return False, f"http {r.status_code}: {body[:160]}"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {exc}"
+    urls = (
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "http://example.com",
+    )
+    errors: list[str] = []
+    with httpx.Client(proxy=proxy, timeout=timeout_sec, follow_redirects=True) as c:
+        for url in urls:
+            try:
+                r = c.get(url)
+                body = (r.text or "").strip()
+                if r.status_code == 200:
+                    return True, "ok"
+                if r.status_code == 403:
+                    m = re.search(r"forbidden ip=([0-9.]+)", body, flags=re.I)
+                    if m:
+                        return False, f"403 forbidden: source ip {m.group(1)} not supported by proxy provider"
+                errors.append(f"{url} -> http {r.status_code}: {body[:120]}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{url} -> {type(exc).__name__}: {exc}")
+    return False, " | ".join(errors[:3]) if errors else "unknown proxy precheck error"
 
 
 def generate_chatgpt_password() -> str:
@@ -93,6 +102,29 @@ def already_in_link_pool() -> set[str]:
     }
 
 
+def _load_domain163_used_emails() -> set[str]:
+    if not DOMAIN163_USED_FILE.exists():
+        return set()
+    used: set[str] = set()
+    for line in DOMAIN163_USED_FILE.read_text(encoding="utf-8").splitlines():
+        email = (line or "").strip().lower()
+        if email and "@" in email:
+            used.add(email)
+    return used
+
+
+def _mark_domain163_email_used(email: str) -> None:
+    value = (email or "").strip().lower()
+    if not value or "@" not in value:
+        return
+    DOMAIN163_USED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = _load_domain163_used_emails()
+    if value in existing:
+        return
+    with DOMAIN163_USED_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(value + "\n")
+
+
 def save_to_link_pool(email: str, query_code: str, payment_link: str) -> None:
     LINK_POOL_DIR.mkdir(parents=True, exist_ok=True)
     with LINK_POOL_FILE.open("a", encoding="utf-8") as f:
@@ -121,7 +153,12 @@ def _resolve_imap163_domain(env: dict[str, str]) -> str:
         if ext_env_path.exists():
             for key, value in load_env(ext_env_path).items():
                 merged.setdefault(key, value)
-    return (merged.get("IMAP163_FORWARD_DOMAIN") or merged.get("MAIL_DOMAIN") or "").strip().lower()
+    raw_domain = (merged.get("IMAP163_FORWARD_DOMAIN") or merged.get("MAIL_DOMAIN") or "").strip().lower()
+    return raw_domain.replace(",", ".")
+
+
+def _domain163_fixed_domain() -> str:
+    return "edu.hanyiz2.com"
 
 
 def _generate_imap163_pending(count: int, done: set[str], domain: str) -> list[tuple[str, str]]:
@@ -145,8 +182,19 @@ def _normalize_mail_source(value: str) -> str:
         "icloud": "icloud_query",
         "icloud_query": "icloud_query",
         "moemail": "moemail",
+        "domain163": "domain163",
+        "domain": "domain163",
+        "domain_mail": "domain163",
     }
     return aliases.get(source, source or "moemail")
+
+
+def _is_domain163_account(account: MailAccount, domain: str) -> bool:
+    email = (account.email or "").strip().lower()
+    mail_url = (account.mail_url or "").strip().lower()
+    if not email or not domain:
+        return False
+    return email.endswith(f"@{domain}") and mail_url == "imap163"
 
 
 def _active_mail_source(cfg: dict[str, Any]) -> str:
@@ -169,6 +217,28 @@ def _load_accounts_from_file(path: Path, done: set[str]) -> list[MailAccount]:
             continue
         accounts.append(account)
     return accounts
+
+
+def _append_mail_accounts(path: Path, accounts: list[MailAccount]) -> int:
+    if not accounts:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lower: set[str] = set()
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            account = parse_mail_line(line.strip()) if line.strip() and not line.strip().startswith("#") else None
+            if account:
+                existing_lower.add(account.email.strip().lower())
+    written = 0
+    with path.open("a", encoding="utf-8") as fh:
+        for account in accounts:
+            email = account.email.strip().lower()
+            if not email or email in existing_lower:
+                continue
+            fh.write((account.raw or f"{account.email}----{account.mail_url}").rstrip() + "\n")
+            existing_lower.add(email)
+            written += 1
+    return written
 
 
 def _remove_from_account_file(email: str, path: Path) -> None:
@@ -409,12 +479,16 @@ async def run_paypal_register(
     """Batch run flow-1 (register + payment link)."""
     env = load_env(".env")
     active_source = _active_mail_source(cfg)
-    accounts_file = resolve_path(str(cfg.get("mail", {}).get("accounts_file") or ""))
+    mail_cfg = cfg.get("mail", {})
+    accounts_file = resolve_path(str(mail_cfg.get("accounts_file") or ""))
+    raw_pool_file = resolve_path(str(mail_cfg.get("raw_pool_file") or ""))
     icloud_file = resolve_path(env.get("PAYPAL_ICLOUD_FILE") or "data/paypal/icloud_accounts.txt")
     done = already_in_link_pool()
+    if active_source == "domain163":
+        done |= _load_domain163_used_emails()
     pending_accounts: list[MailAccount] = []
 
-    if active_source in {"hotmail_graph", "moemail"}:
+    if active_source in {"hotmail_graph", "moemail", "domain163"}:
         pending_accounts = _load_accounts_from_file(accounts_file, done)
     elif active_source == "icloud_query":
         pending_accounts = _load_accounts_from_file(accounts_file, done)
@@ -429,6 +503,28 @@ async def run_paypal_register(
     else:
         pending_accounts = _load_accounts_from_file(accounts_file, done)
 
+    if active_source == "domain163":
+        domain = _domain163_fixed_domain()
+        before_filter = len(pending_accounts)
+        pending_accounts = [item for item in pending_accounts if _is_domain163_account(item, domain)]
+        dropped = before_filter - len(pending_accounts)
+        if dropped > 0:
+            log(f"PayPal flow1: source=domain163, dropped {dropped} non-domain or non-imap163 accounts")
+        if not selected_email:
+            need = max(0, int(count) - len(pending_accounts))
+            if need > 0:
+                generated = [
+                    MailAccount(email=e, mail_url=q, raw=f"{e}----{q}")
+                    for e, q in _generate_imap163_pending(need, done, domain)
+                ]
+                written_accounts = _append_mail_accounts(accounts_file, generated)
+                written_pool = _append_mail_accounts(raw_pool_file, generated)
+                pending_accounts.extend(generated)
+                log(
+                    "PayPal flow1: source=domain163, auto-generated and persisted "
+                    f"{len(generated)} accounts (accounts+{written_accounts}, pool+{written_pool})"
+                )
+
     if selected_email:
         before_count = len(pending_accounts)
         pending_accounts = filter_accounts_by_email(pending_accounts, selected_email)
@@ -440,8 +536,10 @@ async def run_paypal_register(
             return 0
 
     if not pending_accounts:
-        if active_source == "moemail" and _external_imap163_enabled(env):
-            domain = _resolve_imap163_domain(env)
+        if active_source in {"moemail", "domain163"} and (
+            active_source == "domain163" or _external_imap163_enabled(env)
+        ):
+            domain = _domain163_fixed_domain() if active_source == "domain163" else _resolve_imap163_domain(env)
             if domain:
                 pending_accounts = [
                     MailAccount(email=e, mail_url=q, raw=f"{e}----{q}")
@@ -501,7 +599,11 @@ async def run_paypal_register(
                 code_address = account.code_address or "mail"
                 save_to_link_pool(account.email, code_address, link)
                 # Register success consumes one mailbox account from selected source pool.
-                if code_address != "imap163" and accounts_file and accounts_file.exists():
+                if active_source == "domain163":
+                    _mark_domain163_email_used(account.email)
+                    if accounts_file and accounts_file.exists():
+                        _remove_from_account_file(account.email, accounts_file)
+                elif code_address != "imap163" and accounts_file and accounts_file.exists():
                     _remove_from_account_file(account.email, accounts_file)
                 elif code_address != "imap163" and active_source == "icloud_query":
                     remove_from_icloud_file(account.email, icloud_file)

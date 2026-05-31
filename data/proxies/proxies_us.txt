@@ -1,1 +1,3 @@
-http://hpnm1178546-region-US:mwz6vsx1@us.cliproxy.io:3010
+﻿# US proxy pool
+# One proxy per line.
+# Example: http://user:pass@host:port

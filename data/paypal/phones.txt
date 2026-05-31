@@ -1,6 +1,3 @@
-3502524998|https://www.sim999.top/api/get_sms?key=959b6ce7970e53d23c8298636a3bedbb
-3506003085|https://www.sim999.top/api/get_sms?key=a57ff5b3adc265f60cd5153203780591
-3507505754|https://www.sim999.top/api/get_sms?key=3c37be061643a72989ea188424315b77
-3502523611|https://www.sim999.top/api/get_sms?key=94c77168beb1a10f4a70f3d3d4a6eb03
-3502502851|https://www.sim999.top/api/get_sms?key=b9d0dce8db1253515b37e784e0e08832
-3502431456|https://www.sim999.top/api/get_sms?key=693152bb389961953545ee74f2a9c101
+﻿# Format: phone|sms_api_url
+# Example:
+# 15550001111|https://example.com/api/get_sms?key=YOUR_KEY

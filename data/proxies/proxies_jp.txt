@@ -1,1 +1,3 @@
-http://hpnm1178546-region-JP:mwz6vsx1@us.cliproxy.io:3010
+﻿# JP proxy pool
+# One proxy per line.
+# Example: http://user:pass@host:port

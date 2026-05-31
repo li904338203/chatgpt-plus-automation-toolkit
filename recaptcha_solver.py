@@ -22,7 +22,7 @@ import time
 
 import requests
 
-DEFAULT_API_KEY = "usd6taquzvmymzxqjdfyblvuc9h3izgs"
+DEFAULT_API_KEY = os.environ.get("CAPTCHAAI_KEY", "").strip()
 
 IN_URL = "https://ocr.captchaai.com/in.php"
 RES_URL = "https://ocr.captchaai.com/res.php"

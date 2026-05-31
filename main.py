@@ -158,29 +158,38 @@ def choose_mail_source(cfg: dict, source_name: str | None) -> dict:
 
 
 def configure_mail_source(cfg: dict, source_name: str) -> None:
+    source_name = (source_name or "").strip().lower()
     aliases = {
         "hotmail": "hotmail",
         "hotmail_graph": "hotmail",
         "moemail": "moemail",
+        "domain163": "domain163",
+        "domain": "domain163",
+        "domain_mail": "domain163",
         "icloud": "icloud_query",
         "icloud_query": "icloud_query",
     }
     normalized = aliases.get(source_name)
     if not normalized:
-        raise RuntimeError(f"MAIL_SOURCE 仅支持 moemail / hotmail / icloud_query，当前值: {source_name}")
+        raise RuntimeError(f"MAIL_SOURCE 仅支持 moemail / hotmail / icloud_query / domain163，当前值: {source_name}")
     sources = cfg.get("mail_sources") or {}
     source_cfg = sources.get(normalized)
+    if not source_cfg and normalized == "domain163":
+        source_cfg = sources.get("moemail")
     if not source_cfg:
         raise RuntimeError(f"config.yaml 缂哄皯 mail_sources.{normalized}")
     cfg["mail"] = {**cfg.get("mail", {}), **source_cfg}
+    cfg["mail"]["source"] = normalized
     cfg["mail"]["active_source"] = normalized
 
 
 def prompt_mail_source(cfg: dict) -> str:
     sources = cfg.get("mail_sources") or {}
     available = []
-    for key in ("moemail", "hotmail", "icloud_query"):
+    for key in ("moemail", "domain163", "hotmail", "icloud_query"):
         if sources.get(key):
+            available.append(key)
+        elif key == "domain163" and sources.get("moemail"):
             available.append(key)
     if not available:
         raise RuntimeError("config.yaml has no available mail_sources")
@@ -189,6 +198,7 @@ def prompt_mail_source(cfg: dict) -> str:
         "icloud_query": "iCloud 查询邮箱",
         "hotmail": "微软邮箱 (Hotmail / Outlook)",
         "moemail": "自建邮箱池 (MoeMail)",
+        "domain163": "域名邮箱 (163抓码)",
     }
     ui_header("选择邮箱来源", f"当前: {current}")
     for index, key in enumerate(available, start=1):
@@ -717,7 +727,11 @@ def main() -> int:
     parser.add_argument("--count", type=int, help="目标成功数量")
     parser.add_argument("--country", default="", help="流程二/三接码国家: 序号 / ISO / 平台国家 ID，例如 US")
     parser.add_argument("--sms-provider", default="", help="流程二/三接码平台: herosms / grizzly")
-    parser.add_argument("--mail-source", choices=["moemail", "hotmail", "hotmail_graph"], help="邮箱来源: moemail 或 hotmail")
+    parser.add_argument(
+        "--mail-source",
+        choices=["moemail", "hotmail", "hotmail_graph", "domain163"],
+        help="邮箱来源: moemail / hotmail / domain163",
+    )
     parser.add_argument("--register-mode", choices=["phone", "email"], default="phone", help="Free 注册模式: phone(默认) / email")
     args = parser.parse_args()
     if args.mode == "gopay":

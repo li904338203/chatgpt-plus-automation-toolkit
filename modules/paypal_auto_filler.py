@@ -47,19 +47,19 @@ from playwright.sync_api import (
 # ============================ 配置 ============================
 # 仅这里需要手填：手机号 + 对应接码 API + 代理
 CONFIG = {
-    "phone": "+15729108922",
+    "phone": "+15550001111",
     "sms_api_url": (
-        "https://sms.qiqicdn1.cf/api/get_sms"
-        "?key=0fecadf122a13cb89fbe259192f3952e"
+        "https://example.com/api/get_sms"
+        "?key=YOUR_KEY"
     ),
     # 代理：支持 URL 形式（推荐）"http://user:pass@host:port" / "socks5://..."
     # 或简写 "host:port"、"host:port:user:pass"（兼容旧格式），留空 "" 表示直连
     # 浏览器 (Playwright) 和 Python requests (meiguodizhi/SMS/ipinfo) 全部走它
     # 业务代理: 默认空(直连)。需要时用 --proxy URL 临时启用。
-    "proxy": "us.cliproxy.io:3010:hpnm1178546-region-US:mwz6vsx2",
+    "proxy": "",
     # 启动目标 URL：直接在这里填好，不传 argv 也会自动打开
     # 优先级：sys.argv[1] > CONFIG["target_url"] > about:blank
-    "target_url": "https://pay.openai.com/c/pay/cs_live_a1h5o8fRSk1eYWv1dTInNb9nbmCMpSq34emfzP83tFg1TjhHfn5UH1QxjA#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPyd%2FbScpJ3ZwZ3Zmd2x1cWxqa1BrbHRwYGtgdnZAa2RnaWBhJz9jZGl2YCknYnBkZmRoamlgU2R3bGRrcSc%2FJ2Zqa3F3amknKSdkdWxOYHwnPyd1blppbHNgWjA0TUp3VnJGM200a31Cakw2aVFEYldvXFN3fzFhUDZjU0pkZ3xGZk5XNnVnQE9icEZTRGl0Rn1hfUZQc2pXbTRdUnJXZGZTbGpzUDZuSU5zdW5vbTJMdG5SNTVsXVR2b2o2aycpJ2N3amhWYHdzYHcnP3F3cGApJ2dkZm5id2pwa2FGamlqdyc%2FJyZjY2NjY2MnKSdpZHxqcHFRfHVgJz8ndmxrYmlgWmxxYGgnKSdga2RnaWBVaWRmYG1qaWFgd3YnP3F3cGB4JSUl",
+    "target_url": "",
 }
 
 

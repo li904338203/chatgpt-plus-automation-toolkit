@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import asyncio
@@ -38,8 +38,8 @@ install_runtime_project_root()
 from main import apply_env_config
 from main import configure_mail_source
 from modules.paypal_filler_bridge import run_paypal_filler_flow2
-from modules.paypal_flow import _run_paypal_authorize, _run_paypal_session_export
-from modules.paypal_pay import PAYPAL_OUTPUT_ROOT, run_paypal_pay
+from modules.paypal_flow import _run_paypal_authorize
+from modules.paypal_pay import run_paypal_pay
 from modules.paypal_register import run_paypal_register
 from modules.utils import load_config
 
@@ -48,14 +48,13 @@ VALID_ACTIONS = (
     "paypal-flow1",
     "paypal-flow2",
     "paypal-flow2-nocard",
+    "paypal-flow2-jp",
+    "paypal-flow2-jp-nocard",
     "paypal-flow2-filler",
     "paypal-flow3",
-    "paypal-flow3-session",
     "paypal-auto",
     "paypal-auto-nocard",
     "paypal-auto-filler",
-    "paypal-auto-session",
-    "paypal-auto-nocard-session",
     "oauth-login",
     "check-config",
 )
@@ -96,7 +95,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default="config.yaml", help="Config file path")
     parser.add_argument(
         "--mail-source",
-        choices=("default", "moemail", "hotmail", "hotmail_graph", "icloud", "icloud_query"),
+        choices=("default", "moemail", "hotmail", "hotmail_graph", "icloud", "icloud_query", "domain163"),
         default="default",
         help="Override flow mail source",
     )
@@ -137,16 +136,16 @@ def flow_key_for_action(action: str) -> str:
         "paypal-flow1",
         "paypal-flow2",
         "paypal-flow2-nocard",
+        "paypal-flow2-jp",
+        "paypal-flow2-jp-nocard",
         "paypal-flow2-filler",
         "paypal-auto",
         "paypal-auto-nocard",
         "paypal-auto-filler",
-        "paypal-auto-session",
-        "paypal-auto-nocard-session",
         "check-config",
     }:
         return "flow1"
-    if action in {"paypal-flow3", "paypal-flow3-session"}:
+    if action in {"paypal-flow3"}:
         return "flow3"
     return ""
 
@@ -171,6 +170,22 @@ async def _run_async_action(args: argparse.Namespace, cfg: dict) -> int:
         return await run_paypal_pay(cfg, count=args.count, workers=args.workers, card_source_mode="real")
     if args.action == "paypal-flow2-nocard":
         return await run_paypal_pay(cfg, count=args.count, workers=args.workers, card_source_mode="local_random")
+    if args.action == "paypal-flow2-jp":
+        return await run_paypal_pay(
+            cfg,
+            count=args.count,
+            workers=args.workers,
+            card_source_mode="real",
+            flow2_region_mode="jp",
+        )
+    if args.action == "paypal-flow2-jp-nocard":
+        return await run_paypal_pay(
+            cfg,
+            count=args.count,
+            workers=args.workers,
+            card_source_mode="local_random",
+            flow2_region_mode="jp",
+        )
     raise ValueError(f"Unsupported async action: {args.action}")
 
 
@@ -212,7 +227,13 @@ def run_action(args: argparse.Namespace) -> int:
                 flush=True,
             )
             return 0
-        if flow in {"paypal-flow1", "paypal-flow2", "paypal-flow2-nocard"}:
+        if flow in {
+            "paypal-flow1",
+            "paypal-flow2",
+            "paypal-flow2-nocard",
+            "paypal-flow2-jp",
+            "paypal-flow2-jp-nocard",
+        }:
             success = asyncio.run(run_with_playwright_noise_filter(_run_async_action(args, cfg)))
         elif flow == "paypal-flow2-filler":
             success = int(
@@ -235,18 +256,9 @@ def run_action(args: argparse.Namespace) -> int:
                 return 0
             print(result_event(flow, "failure", f"flow3 failed code={auth_code}"), flush=True)
             return auth_code
-        elif flow == "paypal-flow3-session":
-            output_root = str(PAYPAL_OUTPUT_ROOT / "授权成功")
-            export_code = int(_run_paypal_session_export(cfg) or 0)
-            if export_code == 0:
-                print(result_event(flow, "success", "session export completed", path=output_root), flush=True)
-                return 0
-            print(result_event(flow, "failure", f"flow3 session export failed code={export_code}", path=output_root), flush=True)
-            return export_code
-        elif flow in {"paypal-auto", "paypal-auto-nocard", "paypal-auto-filler", "paypal-auto-session", "paypal-auto-nocard-session"}:
+        elif flow in {"paypal-auto", "paypal-auto-nocard", "paypal-auto-filler"}:
             use_filler_flow2 = flow == "paypal-auto-filler"
-            use_local_random_mode = flow in {"paypal-auto-nocard", "paypal-auto-nocard-session"}
-            use_session_export = flow in {"paypal-auto-session", "paypal-auto-nocard-session"}
+            use_local_random_mode = flow == "paypal-auto-nocard"
             reg_success = asyncio.run(
                 run_with_playwright_noise_filter(
                     run_paypal_register(
@@ -280,16 +292,10 @@ def run_action(args: argparse.Namespace) -> int:
             if pay_success <= 0:
                 print(result_event(flow, "failure", "flow2 produced no pending auth accounts"), flush=True)
                 return 1
-            if use_session_export:
-                export_code = int(_run_paypal_session_export(cfg) or 0)
-                if export_code != 0:
-                    print(result_event(flow, "failure", f"flow3 session export failed code={export_code}"), flush=True)
-                    return export_code
-            else:
-                auth_code = int(_run_paypal_authorize(count=pay_success, workers=workers) or 0)
-                if auth_code != 0:
-                    print(result_event(flow, "failure", f"flow3 failed code={auth_code}"), flush=True)
-                    return auth_code
+            auth_code = int(_run_paypal_authorize(count=pay_success, workers=workers) or 0)
+            if auth_code != 0:
+                print(result_event(flow, "failure", f"flow3 failed code={auth_code}"), flush=True)
+                return auth_code
             success = pay_success
         else:
             raise ValueError(f"Unsupported action: {flow}")
