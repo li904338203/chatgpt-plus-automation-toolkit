@@ -1,0 +1,57 @@
+browser:
+  headless: false
+  slow_mo: 80
+  timeout_ms: 60000
+  use_proxy: false
+  proxy_file: "data/proxies/proxies.txt"
+
+chatgpt:
+  start_url: "https://chatgpt.com/auth/login"
+  entry_action: "login"
+  plan_name: "chatgptplusplan"
+  checkout_ui_mode: "hosted"
+  billing_country: "ID"
+  currency: "IDR"
+  promo_campaign_id: "plus-1-month-free"
+  cancel_url: "https://chatgpt.com/#pricing"
+
+mail:
+  active_source: "moemail"
+  source: "moemail"
+  account_mode: "pool"
+  accounts_file: "data/accounts.txt"
+  raw_pool_file: "data/mail_pool.txt"
+  code_timeout_sec: 150
+  poll_interval_sec: 5
+  moemail_domains: "intereloucer.com,interestedloucer.com,interestloucered.com"
+  moemail_create_prefix: "openai"
+  moemail_create_mode: "human"
+
+mail_sources:
+  moemail:
+    source: "moemail"
+    accounts_file: "data/accounts.txt"
+    raw_pool_file: "data/mail_pool.txt"
+    code_timeout_sec: 150
+    poll_interval_sec: 5
+  hotmail:
+    source: "hotmail_graph"
+    accounts_file: "data/hotmail/accounts.txt"
+    raw_pool_file: "data/hotmail/mail_pool.txt"
+    code_timeout_sec: 150
+    poll_interval_sec: 5
+  icloud_query:
+    source: "icloud_query"
+    accounts_file: "data/icloud/accounts.txt"
+    raw_pool_file: "data/icloud/mail_pool.txt"
+    code_timeout_sec: 150
+    poll_interval_sec: 5
+
+register_profile:
+  age_min: 21
+  age_max: 45
+
+output:
+  success_file: "output/流程1_注册成功长链接.txt"
+  failed_file: "output/流程1_注册失败账号.txt"
+  in_progress_file: "output/流程1_注册处理中.txt"

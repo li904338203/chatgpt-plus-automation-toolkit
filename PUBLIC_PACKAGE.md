@@ -1,12 +1,15 @@
 ﻿# Public Package Notes
 
-The repository contains source code plus a sanitized runtime package under `release/`.
+This repository includes source code plus a sanitized ready-to-run runtime folder:
 
-To restore the ready-to-run control panel with bundled browser, run:
-
-```powershell
-cd release
-powershell -ExecutionPolicy Bypass -File .\restore_runtime.ps1
+```text
+ChatGPTAssistantPanel\ChatGPTAssistantPanel.exe
 ```
 
-Then configure your own `.env`, `config.yaml`, and `data/` pools.
+Before running, configure your own files:
+
+- `ChatGPTAssistantPanel\.env`
+- `ChatGPTAssistantPanel\config.yaml`
+- `ChatGPTAssistantPanel\data\` pools
+
+The runtime folder includes the bundled Playwright browser, so no separate restore step is required.
