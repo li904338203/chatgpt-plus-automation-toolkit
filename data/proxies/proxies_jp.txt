@@ -1,3 +1,1 @@
-﻿# JP proxy pool
-# One proxy per line.
-# Example: http://user:pass@host:port
+﻿

@@ -1,3 +1,1 @@
-﻿# Format: email----password----client_id----refresh_token
-# Example:
-# demo@example.com----your-password----your-client-id----your-refresh-token
+﻿

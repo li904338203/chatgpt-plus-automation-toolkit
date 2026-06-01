@@ -1,3 +1,1 @@
-﻿# Format: phone|sms_api_url
-# Example:
-# 15550001111|https://example.com/api/get_sms?key=YOUR_KEY
+﻿

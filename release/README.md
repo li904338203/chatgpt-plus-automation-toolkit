@@ -1,19 +1,31 @@
-# Release Files
+﻿# Public Runtime Package
 
-- `ChatGPTAssistantPanel-portable-lite.zip`: Windows portable package (recommended).
+This release folder contains a sanitized, split runtime package with the control panel and bundled Playwright browser.
 
-## Usage
+## Restore
 
-1. Download `ChatGPTAssistantPanel-portable-lite.zip`
-2. Extract the whole zip to a folder
-3. Run `ChatGPTAssistantPanel.exe` inside extracted folder
+Run in PowerShell:
 
-## Notes for Lite Package
+```powershell
+powershell -ExecutionPolicy Bypass -File .\restore_runtime.ps1
+```
 
-- `portable-lite` does **not** bundle Playwright browser binaries to keep file size small.
-- If browser launch fails, either:
-  - use local Chrome fallback in the panel/script settings, or
-  - run Playwright browser install on that machine (`playwright install chromium`) before use.
+It will create:
 
-Do not run a single copied `ChatGPTAssistantPanel.exe` without `_internal`, or you will get:
-`Failed to load Python DLL ...\_internal\python313.dll`.
+```text
+release\runtime\ChatGPTAssistantPanel\ChatGPTAssistantPanel.exe
+```
+
+## Before Running
+
+Edit these files with your own data:
+
+- `.env`
+- `config.yaml`
+- `data\hotmail\accounts.txt`
+- `data\proxies\proxies_us.txt` / `data\proxies\proxies_jp.txt`
+- `data\paypal\cards.txt`
+- `data\paypal\phones.txt`
+- `data\auth\phones.txt`
+
+No private account, proxy, card, phone, API key, or local runtime data is included.

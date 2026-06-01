@@ -12,7 +12,6 @@ import random
 import re
 import time
 import traceback
-from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
 
@@ -66,17 +65,65 @@ _RANDOM_CARD_PROFILES_JP: list[tuple[str, str, str, str, str]] = [
     ("Hiroshima", "Hiroshima", "7300011", "Naka Motomachi 1-3", "JP"),
 ]
 
+_MEIGUODIZHI_ADDRESS_URL = "https://www.meiguodizhi.com/api/v1/dz"
+_BILLING_ADDRESS_REGION_PATHS = {
+    "US": "/",
+    "JP": "/jp-address",
+}
+_VISA_BIN_PREFIXES = (
+    "4859",
+    "424631",
+    "414709",
+)
+
 _JP_PREFECTURE_LABELS: dict[str, str] = {
     "Tokyo": "東京都",
     "Osaka": "大阪府",
     "Kanagawa": "神奈川県",
     "Aichi": "愛知県",
     "Hokkaido": "北海道",
+    "Aomori": "青森県",
+    "Iwate": "岩手県",
+    "Akita": "秋田県",
+    "Yamagata": "山形県",
+    "Fukushima": "福島県",
     "Fukuoka": "福岡県",
     "Kyoto": "京都府",
     "Hyogo": "兵庫県",
     "Miyagi": "宮城県",
+    "Ibaraki": "茨城県",
+    "Tochigi": "栃木県",
+    "Gunma": "群馬県",
+    "Saitama": "埼玉県",
+    "Chiba": "千葉県",
+    "Niigata": "新潟県",
+    "Toyama": "富山県",
+    "Ishikawa": "石川県",
+    "Fukui": "福井県",
+    "Yamanashi": "山梨県",
+    "Nagano": "長野県",
+    "Gifu": "岐阜県",
+    "Shizuoka": "静岡県",
+    "Mie": "三重県",
+    "Shiga": "滋賀県",
+    "Nara": "奈良県",
+    "Wakayama": "和歌山県",
+    "Tottori": "鳥取県",
+    "Shimane": "島根県",
+    "Okayama": "岡山県",
     "Hiroshima": "広島県",
+    "Yamaguchi": "山口県",
+    "Tokushima": "徳島県",
+    "Kagawa": "香川県",
+    "Ehime": "愛媛県",
+    "Kochi": "高知県",
+    "Saga": "佐賀県",
+    "Nagasaki": "長崎県",
+    "Kumamoto": "熊本県",
+    "Oita": "大分県",
+    "Miyazaki": "宮崎県",
+    "Kagoshima": "鹿児島県",
+    "Okinawa": "沖縄県",
 }
 
 _JP_PAYPAL_PREFECTURE_CODES: dict[str, str] = {
@@ -85,11 +132,48 @@ _JP_PAYPAL_PREFECTURE_CODES: dict[str, str] = {
     "Kanagawa": "KANAGAWA-KEN",
     "Aichi": "AICHI-KEN",
     "Hokkaido": "HOKKAIDO",
+    "Aomori": "AOMORI-KEN",
+    "Iwate": "IWATE-KEN",
+    "Akita": "AKITA-KEN",
+    "Yamagata": "YAMAGATA-KEN",
+    "Fukushima": "FUKUSHIMA-KEN",
     "Fukuoka": "FUKUOKA-KEN",
     "Kyoto": "KYOTO-FU",
     "Hyogo": "HYOGO-KEN",
     "Miyagi": "MIYAGI-KEN",
+    "Ibaraki": "IBARAKI-KEN",
+    "Tochigi": "TOCHIGI-KEN",
+    "Gunma": "GUNMA-KEN",
+    "Saitama": "SAITAMA-KEN",
+    "Chiba": "CHIBA-KEN",
+    "Niigata": "NIIGATA-KEN",
+    "Toyama": "TOYAMA-KEN",
+    "Ishikawa": "ISHIKAWA-KEN",
+    "Fukui": "FUKUI-KEN",
+    "Yamanashi": "YAMANASHI-KEN",
+    "Nagano": "NAGANO-KEN",
+    "Gifu": "GIFU-KEN",
+    "Shizuoka": "SHIZUOKA-KEN",
+    "Mie": "MIE-KEN",
+    "Shiga": "SHIGA-KEN",
+    "Nara": "NARA-KEN",
+    "Wakayama": "WAKAYAMA-KEN",
+    "Tottori": "TOTTORI-KEN",
+    "Shimane": "SHIMANE-KEN",
+    "Okayama": "OKAYAMA-KEN",
     "Hiroshima": "HIROSHIMA-KEN",
+    "Yamaguchi": "YAMAGUCHI-KEN",
+    "Tokushima": "TOKUSHIMA-KEN",
+    "Kagawa": "KAGAWA-KEN",
+    "Ehime": "EHIME-KEN",
+    "Kochi": "KOCHI-KEN",
+    "Saga": "SAGA-KEN",
+    "Nagasaki": "NAGASAKI-KEN",
+    "Kumamoto": "KUMAMOTO-KEN",
+    "Oita": "OITA-KEN",
+    "Miyazaki": "MIYAZAKI-KEN",
+    "Kagoshima": "KAGOSHIMA-KEN",
+    "Okinawa": "OKINAWA-KEN",
 }
 
 _JP_FIRST_NAME_META: dict[str, tuple[str, str]] = {
@@ -201,6 +285,108 @@ def _build_luhn_card_number(prefix: str, random_part_length: int, *, rng: random
     return body + _luhn_check_digit(body)
 
 
+def _normalize_card_expiry(value: str) -> tuple[str, str]:
+    text = str(value or "").strip()
+    parts = [p for p in re.split(r"\D+", text) if p]
+    if len(parts) < 2:
+        return "", ""
+    first, second = parts[0], parts[1]
+    try:
+        first_num = int(first)
+        second_num = int(second)
+    except ValueError:
+        return "", ""
+    if first_num > 12 and 1 <= second_num <= 12:
+        first, second = second, first
+        first_num = second_num
+    if not (1 <= first_num <= 12):
+        return "", ""
+    year = str(second)
+    if len(year) == 2:
+        year = "20" + year
+    return str(first_num).zfill(2), year
+
+
+def _generate_abai_visa_card(rng: random.Random) -> dict[str, str]:
+    bin_prefix = _VISA_BIN_PREFIXES[rng.randrange(len(_VISA_BIN_PREFIXES))]
+    random_len = 16 - len(bin_prefix) - 1
+    year = time.gmtime().tm_year + rng.randint(2, 4)
+    return {
+        "card_number": _build_luhn_card_number(bin_prefix, random_len, rng=rng),
+        "card_exp_month": str(rng.randint(1, 12)).zfill(2),
+        "card_exp_year": str(year),
+        "card_cvv": "".join(str(rng.randint(0, 9)) for _ in range(3)),
+    }
+
+
+def _normalize_meiguodizhi_billing_address(data: dict[str, Any], *, email: str, country: str) -> dict[str, str]:
+    address = data.get("address") if isinstance(data, dict) else {}
+    if not isinstance(address, dict):
+        address = {}
+    exp_month, exp_year = _normalize_card_expiry(
+        str(address.get("Expires") or address.get("expires") or address.get("card_expiry") or "")
+    )
+    normalized = {
+        "name": str(address.get("Full_Name") or address.get("name") or "").strip(),
+        "line1": str(address.get("Address") or address.get("line1") or "").strip(),
+        "city": str(address.get("City") or address.get("city") or "").strip(),
+        "state": str(address.get("State") or address.get("state") or "").strip(),
+        "postal_code": str(address.get("Zip_Code") or address.get("postal_code") or "").strip(),
+        "phone": str(address.get("Telephone") or address.get("phone") or "").strip(),
+        "country": str(country or "US").strip().upper() or "US",
+        "email": str(email or address.get("Temporary_mail") or "").strip(),
+    }
+    card_number = str(
+        address.get("Credit_Card_Number")
+        or address.get("credit_card_number")
+        or address.get("card_number")
+        or ""
+    ).strip()
+    card_cvv = str(address.get("CVV2") or address.get("cvv") or address.get("card_cvv") or "").strip()
+    if card_number:
+        normalized["card_number"] = card_number
+    if exp_month:
+        normalized["card_exp_month"] = exp_month
+    if exp_year:
+        normalized["card_exp_year"] = exp_year
+    if card_cvv:
+        normalized["card_cvv"] = card_cvv
+    return normalized
+
+
+def _fetch_abai_billing_address(region: str, *, email: str, rng: random.Random) -> dict[str, str]:
+    region_key = str(region or "").strip().upper()
+    if region_key not in _BILLING_ADDRESS_REGION_PATHS:
+        region_key = "US"
+    path = _BILLING_ADDRESS_REGION_PATHS[region_key]
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                _MEIGUODIZHI_ADDRESS_URL,
+                json={"path": path, "method": "address"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            address = _normalize_meiguodizhi_billing_address(
+                data if isinstance(data, dict) else {},
+                email=email,
+                country=region_key,
+            )
+            missing = [key for key in ("name", "line1", "city", "state", "postal_code") if not address.get(key)]
+            if missing:
+                raise ValueError(f"{region_key} 地址接口返回字段不完整: {', '.join(missing)}")
+            address.update(_generate_abai_visa_card(rng))
+            return address
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= 3:
+                break
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+    raise RuntimeError(f"{region_key} 地址接口获取失败: {last_exc}")
+
+
 def _generate_local_random_card(
     index: int,
     email: str,
@@ -211,8 +397,9 @@ def _generate_local_random_card(
     seed_raw = f"{email.lower()}::{index}::{time.time_ns()}"
     seed = int(hashlib.sha256(seed_raw.encode("utf-8")).hexdigest()[:16], 16)
     rng = random.Random(seed)
+    region_key = "JP" if _normalize_flow2_region_mode(region_mode) == "jp" else "US"
 
-    if _normalize_flow2_region_mode(region_mode) == "jp":
+    if region_key == "JP":
         first_pool = ["Haruto", "Yui", "Sota", "Sakura", "Ren", "Yuna", "Daiki", "Mio"]
         last_pool = ["Sato", "Suzuki", "Takahashi", "Tanaka", "Watanabe", "Ito", "Yamamoto", "Nakamura"]
         profile = _RANDOM_CARD_PROFILES_JP[rng.randrange(len(_RANDOM_CARD_PROFILES_JP))]
@@ -224,6 +411,41 @@ def _generate_local_random_card(
     first_name = first_pool[rng.randrange(len(first_pool))]
     last_name = last_pool[rng.randrange(len(last_pool))]
     holder = f"{first_name} {last_name}"
+
+    try:
+        abai_address = _fetch_abai_billing_address(region_key, email=email, rng=rng)
+        api_name = str(abai_address.get("name") or "").strip()
+        name_parts = api_name.split()
+        if len(name_parts) >= 2:
+            first_name = name_parts[0]
+            last_name = " ".join(name_parts[1:])
+            holder = api_name
+        elif api_name:
+            holder = api_name
+        log(
+            f"PayPal flow2: 使用 aBaiAutoplus 账单生成逻辑: "
+            f"region={region_key}, city={abai_address.get('city', '')}, "
+            f"state={abai_address.get('state', '')}, zip={abai_address.get('postal_code', '')}"
+        )
+        return CardInfo(
+            number=str(abai_address["card_number"]),
+            exp_month=str(abai_address["card_exp_month"]).zfill(2),
+            exp_year=str(abai_address["card_exp_year"])[-2:],
+            cvv=str(abai_address["card_cvv"]),
+            holder_name=holder,
+            first_name=first_name,
+            last_name=last_name,
+            street=str(abai_address.get("line1") or ""),
+            city=str(abai_address.get("city") or ""),
+            state=str(abai_address.get("state") or ""),
+            zip_code=str(abai_address.get("postal_code") or ""),
+            country=str(abai_address.get("country") or region_key),
+            phone=str(abai_address.get("phone") or ""),
+            sms_api_url="",
+            raw_line=f"ABAI_RANDOM::{region_key}::{email}::{index}",
+        )
+    except Exception as exc:
+        log(f"PayPal flow2: aBaiAutoplus 账单生成失败，回退本地随机资料: {exc}")
 
     city, state, zip_code, street_base, country = profile
     street_no = rng.randint(10, 9999)
@@ -239,16 +461,8 @@ def _generate_local_random_card(
     if custom_bin_allowed:
         bin_prefix = custom_bin
     else:
-        brands_raw = (env.get("PAYPAL_RANDOM_CARD_BRAND") or "visa,mastercard").strip().lower()
-        brands = {b.strip() for b in brands_raw.split(",") if b.strip()}
-        allowed_prefixes: list[str] = []
-        if "visa" in brands:
-            allowed_prefixes.extend(["453201", "448527", "412345"])
-        if "mastercard" in brands or "master" in brands:
-            allowed_prefixes.extend(["510510", "222100"])
-        allowed_prefixes = [prefix for prefix in allowed_prefixes if not prefix.startswith("5200")]
-        if not allowed_prefixes:
-            allowed_prefixes = ["453201", "510510"]
+        # 固定本地随机卡头池（流程2）
+        allowed_prefixes = ["485954", "490714", "491688"]
         bin_prefix = allowed_prefixes[rng.randrange(len(allowed_prefixes))]
     random_len = 15 - len(bin_prefix)
     number = _build_luhn_card_number(bin_prefix, random_len, rng=rng)
@@ -1813,7 +2027,8 @@ async def fill_paypal(
     async def _fill_paypal_jp_prefecture() -> tuple[bool, str]:
         pref_label = _JP_PREFECTURE_LABELS.get(card.state, card.state)
         pref_code = _JP_PAYPAL_PREFECTURE_CODES.get(card.state, "")
-        pref_keys = [pref_label, card.state, pref_code]
+        pref_code_base = pref_code.rsplit("-", 1)[0] if "-" in pref_code else pref_code
+        pref_keys = [pref_label, card.state, pref_code, pref_code_base, card.state.upper()]
         pref_keys = [x for x in pref_keys if x]
 
         # 1) 原生 select_option
@@ -2203,15 +2418,10 @@ async def fill_paypal(
 async def handle_paypal_captcha(page, timeout_seconds: int = 180, solver_proxy: str | None = None, force: bool = False) -> None:
     """检测 PayPal 人机验证码并处理。
 
-    支持两种模式（通过 .env 配置）：
-    - PAYPAL_CAPTCHA_MODE=manual（默认）：检测到验证码后暂停等待手动处理
-    - PAYPAL_CAPTCHA_MODE=api：调用打码平台 API 自动解决
-
-    .env 配置项：
-        PAYPAL_CAPTCHA_MODE=manual          # manual 或 api
-        PAYPAL_CAPTCHA_TIMEOUT=180          # 等待超时秒数（手动模式）
-        CAPSOLVER_API_KEY=CAP-xxx           # CapSolver API Key（api 模式）
+    当前只保留人工处理逻辑；检测到 hosted checkout 的遮挡层时，先按
+    GuJumpgate 的做法清理页面上的 captcha artifact，再等待人工完成。
     """
+    await _remove_hosted_captcha_artifacts(page)
     # 检测是否有验证码弹窗（避免 v3 eval 误判）
     has_captcha, reason = await _detect_captcha_signal(page)
     if not has_captcha and not force:
@@ -2236,19 +2446,83 @@ async def handle_paypal_captcha(page, timeout_seconds: int = 180, solver_proxy: 
 
     log(f"[PayPal] ⚠️ 检测到人机验证码（CAPTCHA），需要处理... reason={reason_2 or reason}")
 
-    env = load_env(".env")
-    mode = (env.get("PAYPAL_CAPTCHA_MODE") or "manual").strip().lower()
+    removed = await _cleanup_hosted_captcha_artifacts(page, timeout_ms=15000)
+    if removed:
+        log(f"[PayPal] 已清理 hosted captcha 遮挡元素 {removed} 个，继续检测页面状态")
+        await page.wait_for_timeout(800)
+        if not await _detect_captcha(page):
+            log("[PayPal] CAPTCHA 遮挡元素已移除，继续流程")
+            return
 
-    if mode == "api":
-        await _solve_captcha_via_api(page, env, solver_proxy=solver_proxy)
-    else:
-        await _wait_captcha_manual(page, timeout_seconds)
+    await _wait_captcha_manual(page, timeout_seconds)
 
 
 async def _detect_captcha(page) -> bool:
     """检测页面是否出现了验证码弹窗。"""
+    await _remove_hosted_captcha_artifacts(page)
     ok, _ = await _detect_captcha_signal(page)
     return ok
+
+
+async def _remove_hosted_captcha_artifacts(page) -> int:
+    """移除 PayPal hosted checkout 上会遮挡按钮的 captcha 容器。"""
+    script = """() => {
+        let removed = 0;
+        const selectors = [
+            '#captcha-standalone',
+            '.captcha-overlay',
+            '.captcha-container',
+        ];
+        for (const selector of selectors) {
+            for (const node of Array.from(document.querySelectorAll(selector))) {
+                try {
+                    node.remove();
+                    removed += 1;
+                } catch {}
+            }
+        }
+        return removed;
+    }"""
+    total = 0
+    targets = [page]
+    try:
+        targets.extend([fr for fr in page.frames if fr is not page.main_frame])
+    except Exception:
+        pass
+    for target in targets:
+        try:
+            total += int(await target.evaluate(script) or 0)
+        except Exception:
+            continue
+    return total
+
+
+async def _cleanup_hosted_captcha_artifacts(page, timeout_ms: int = 15000) -> int:
+    """短时间持续清理新插入的 hosted captcha artifact。"""
+    deadline = time.monotonic() + max(1.0, timeout_ms / 1000)
+    total = 0
+    while time.monotonic() < deadline:
+        total += await _remove_hosted_captcha_artifacts(page)
+        await page.wait_for_timeout(300)
+        if not await _has_hosted_captcha_artifact(page):
+            break
+    return total
+
+
+async def _has_hosted_captcha_artifact(page) -> bool:
+    script = """() => !!document.querySelector('#captcha-standalone, .captcha-overlay, .captcha-container')"""
+    targets = [page]
+    try:
+        targets.extend([fr for fr in page.frames if fr is not page.main_frame])
+    except Exception:
+        pass
+    for target in targets:
+        try:
+            if await target.evaluate(script):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _detect_captcha_signal(page) -> tuple[bool, str]:
@@ -2482,6 +2756,9 @@ async def _wait_captcha_manual(page, timeout_seconds: int = 180) -> None:
 
     start = asyncio.get_event_loop().time()
     while asyncio.get_event_loop().time() - start < timeout_seconds:
+        removed = await _remove_hosted_captcha_artifacts(page)
+        if removed:
+            log(f"[PayPal] 人工等待期间已清理 hosted captcha 遮挡元素 {removed} 个")
         await page.wait_for_timeout(3000)
         # 检查验证码是否已消失
         still_has = await _detect_captcha(page)
@@ -2628,6 +2905,7 @@ async def _wait_captcha_cleared(page, timeout_seconds: int = 45) -> bool:
     """等待验证码真正消失，或页面进入下一步（短信/验证页）。"""
     start = asyncio.get_event_loop().time()
     while asyncio.get_event_loop().time() - start < timeout_seconds:
+        await _remove_hosted_captcha_artifacts(page)
         await page.wait_for_timeout(1500)
         if not await _detect_captcha(page):
             return True
@@ -2711,513 +2989,10 @@ async def _post_captcha_nudge(page) -> None:
 
 
 async def _solve_captcha_via_api(page, env: dict[str, str], solver_proxy: str | None = None) -> None:
-    """方案2：调用打码平台 API 自动解决验证码。
-
-    目前支持 CapSolver / CaptchaAI / 2Captcha。
-
-    .env 配置：
-        CAPSOLVER_API_KEY=CAP-xxxxxxxx     # CapSolver API Key
-        CAPTCHA_API_PROVIDER=capsolver      # capsolver / captchaai / twocaptcha
-        TWOCAPTCHA_API_KEY=xxxxxxxx         # 2Captcha API Key（如果用 2Captcha）
-        CAPTCHAAI_KEY=xxxxxxxx              # CaptchaAI API Key（如果用 captchaai）
-
-    工作原理：
-    1. 检测验证码类型（reCAPTCHA v2 / hCaptcha / 图片验证码）
-    2. 提取 sitekey 和页面 URL
-    3. 发送到打码平台
-    4. 等待返回 token
-    5. 将 token 注入页面回调函数
-    """
-    provider = (env.get("CAPTCHA_API_PROVIDER") or "capsolver").strip().lower()
-
-    if provider == "capsolver":
-        api_key = (env.get("CAPSOLVER_API_KEY") or "").strip()
-        if not api_key:
-            log("[PayPal] CAPSOLVER_API_KEY 未配置，回退到手动模式")
-            await _wait_captcha_manual(page)
-            return
-        await _solve_with_capsolver(page, api_key)
-    elif provider == "captchaai":
-        api_key = (env.get("CAPTCHAAI_KEY") or env.get("CAPTCHAAI_API_KEY") or "").strip()
-        if not api_key:
-            log("[PayPal] CAPTCHAAI_KEY 未配置，回退到手动模式")
-            await _wait_captcha_manual(page)
-            return
-        await _solve_with_captchaai(page, api_key, env, solver_proxy=solver_proxy)
-    elif provider == "twocaptcha":
-        api_key = (env.get("TWOCAPTCHA_API_KEY") or "").strip()
-        if not api_key:
-            log("[PayPal] TWOCAPTCHA_API_KEY 未配置，回退到手动模式")
-            await _wait_captcha_manual(page)
-            return
-        await _solve_with_twocaptcha(page, api_key)
-    else:
-        log(f"[PayPal] 未知打码平台: {provider}，回退到手动模式")
-        await _wait_captcha_manual(page)
-
-
-async def _extract_captcha_info(page) -> dict[str, str]:
-    """提取验证码参数，支持 reCAPTCHA v2 / v3 与 hCaptcha。"""
-    return await page.evaluate("""() => {
-        const pickQuery = (src, keys) => {
-            try {
-                const u = new URL(src, location.href);
-                const want = new Set((keys || []).map(k => String(k).toLowerCase()));
-                for (const [k, v] of u.searchParams.entries()) {
-                    if (want.has(String(k).toLowerCase()) && (v || '').trim()) return String(v).trim();
-                }
-            } catch {}
-            return '';
-        };
-        const isEnterprise = !!window.grecaptcha?.enterprise || !!document.querySelector('script[src*="recaptcha/enterprise"]');
-        const frames = Array.from(document.querySelectorAll('iframe[src]')).map(f => f.getAttribute('src') || '');
-
-        const recFrames = frames.filter(src => /recaptcha/i.test(src));
-        if (recFrames.length) {
-            // 优先选真正 challenge 相关的 v2 iframe，避免误用 v3 eval key
-            let rec = recFrames.find(src => /recaptcha_v2|api2\\/anchor|api2\\/bframe/i.test(src));
-            if (!rec) {
-                rec = recFrames.find(src => /[?&](k|sitekey|siteKey)=/i.test(src)) || recFrames[0];
-            }
-            const low = rec.toLowerCase();
-            const siteKey = pickQuery(rec, ['k', 'sitekey', 'siteKey', 'render']);
-            const dataS = pickQuery(rec, ['s', 'data-s']);
-            const action = pickQuery(rec, ['action']) || 'verify';
-            const isV3 = /recaptcha_v3/.test(low) || (/api\\.js/.test(low) && /(?:\\?|&)render=/.test(low));
-            const isInvisible = /(?:\\?|&)size=invisible(?:&|$)/.test(low) || /invisible/.test(low);
-            return {
-                provider: 'recaptcha',
-                version: isV3 ? 'v3' : 'v2',
-                enterprise: isEnterprise ? '1' : '0',
-                siteKey: siteKey ? decodeURIComponent(siteKey) : '',
-                pageurl: rec,
-                dataS,
-                action,
-                invisible: (isV3 || isInvisible) ? '1' : '0',
-            };
-        }
-
-        const hc = frames.find(src => /hcaptcha/i.test(src));
-        if (hc) {
-            const siteKey = pickQuery(hc, ['sitekey', 'siteKey']);
-            return {
-                provider: 'hcaptcha',
-                version: 'v2',
-                enterprise: '0',
-                siteKey: siteKey ? decodeURIComponent(siteKey) : '',
-                pageurl: hc,
-                dataS: '',
-                action: 'verify',
-                invisible: '0',
-            };
-        }
-
-        const el = document.querySelector('[data-sitekey]');
-        if (el) {
-            const siteKey = el.getAttribute('data-sitekey') || '';
-            const isHcaptcha = !!document.querySelector('.h-captcha, [data-hcaptcha-widget-id]');
-            return {
-                provider: isHcaptcha ? 'hcaptcha' : 'recaptcha',
-                version: 'v2',
-                enterprise: isEnterprise ? '1' : '0',
-                siteKey,
-                pageurl: location.href,
-                dataS: '',
-                action: 'verify',
-                invisible: '0',
-            };
-        }
-
-        return {
-            provider: 'unknown',
-            version: 'v2',
-            enterprise: '0',
-            siteKey: '',
-            pageurl: location.href,
-            dataS: '',
-            action: 'verify',
-            invisible: '0',
-        };
-    }""")
-
-
-async def _get_recaptcha_frame_hints(page) -> list[str]:
-    """返回页面中 reCAPTCHA 相关 iframe 的 src（用于调试版本识别）。"""
-    try:
-        return await page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('iframe[src]'))
-                .map(f => f.getAttribute('src') || '')
-                .filter(src => /recaptcha/i.test(src))
-                .slice(0, 8);
-        }""")
-    except Exception:
-        return []
-
-
-def _parse_solver_proxy(proxy: str | None) -> tuple[str, str] | tuple[None, None]:
-    """把浏览器代理转换成打码平台 proxy/proxytype 参数。"""
-    if not proxy:
-        return None, None
-    raw = proxy.strip()
-    if not raw:
-        return None, None
-    if "://" not in raw:
-        raw = f"http://{raw}"
-    try:
-        u = urlparse(raw)
-        scheme = (u.scheme or "http").lower()
-        host = u.hostname or ""
-        port = u.port
-        if not host or not port:
-            return None, None
-        auth = ""
-        if u.username:
-            auth = u.username
-            if u.password:
-                auth += f":{u.password}"
-            auth += "@"
-        solver_proxy = f"{auth}{host}:{port}"
-        proxy_type = "SOCKS5" if "socks5" in scheme else "HTTP"
-        return solver_proxy, proxy_type
-    except Exception:
-        return None, None
-
-
-async def _solve_with_captchaai(page, api_key: str, env: dict[str, str], solver_proxy: str | None = None) -> None:
-    """使用 CaptchaAI 解决验证码（支持 reCAPTCHA v2/v3 + hCaptcha）。"""
-    import recaptcha_solver as rs
-
-    log("[PayPal] 使用 CaptchaAI 打码平台...")
-    info = await _extract_captcha_info(page)
-    provider = info.get("provider", "unknown")
-    version = info.get("version", "v2")
-    force_v2 = (env.get("PAYPAL_CAPTCHA_FORCE_V2") or "").strip().lower() in ("1", "true", "yes")
-    if force_v2 and version == "v3":
-        version = "v2"
-    enterprise = info.get("enterprise") == "1"
-    invisible = info.get("invisible") == "1"
-    site_key = info.get("siteKey", "")
-    page_url = info.get("pageurl") or page.url
-    action = info.get("action") or "verify"
-    data_s = info.get("dataS") or ""
-
-    if not site_key or provider not in {"recaptcha", "hcaptcha"}:
-        log(f"[PayPal] CaptchaAI 未提取到可用 sitekey/provider，回退到手动模式 | provider={provider}")
-        await _wait_captcha_manual(page)
-        return
-    if provider == "hcaptcha":
-        page_url = page.url
-
-    proxy_for_solver, proxy_type = _parse_solver_proxy(solver_proxy)
-    hints = await _get_recaptcha_frame_hints(page)
-    if hints:
-        log(f"[PayPal] CAPTCHA frame hints: {' | '.join(hints)}")
-    log(
-        f"[PayPal] 本地求解参数: provider={provider} version={version} enterprise={enterprise} invisible={invisible} "
-        f"proxy={bool(proxy_for_solver)} sitekey={site_key[:20]}... pageurl={str(page_url)[:120]}"
-    )
-    token = ""
-    try:
-        server_retry = 2
-        try:
-            server_retry = max(0, int((env.get("PAYPAL_CAPTCHAAI_SERVER_RETRY") or "2").strip() or "2"))
-        except Exception:
-            server_retry = 2
-        total_attempts = server_retry + 1
-        for attempt in range(1, total_attempts + 1):
-            try:
-                if provider == "hcaptcha":
-                    token = await asyncio.to_thread(
-                        rs.solve_hcaptcha,
-                        api_key,
-                        site_key,
-                        page_url,
-                        180,
-                        20,
-                        5,
-                        invisible,
-                        proxy_for_solver or "",
-                        proxy_type or "HTTP",
-                    )
-                elif version == "v3":
-                    min_score = 0.3
-                    try:
-                        min_score = float((env.get("PAYPAL_CAPTCHA_V3_MIN_SCORE") or "0.3").strip() or "0.3")
-                    except Exception:
-                        min_score = 0.3
-                    token = await asyncio.to_thread(
-                        rs.solve_recaptcha_v3,
-                        api_key, site_key, page_url, action, min_score, enterprise, 180
-                    )
-                else:
-                    token = await asyncio.to_thread(
-                        rs.solve_recaptcha_v2,
-                        api_key, site_key, page_url, invisible, enterprise, 180, 20, 5, data_s, proxy_for_solver, proxy_type
-                    )
-                break
-            except Exception as exc:
-                err = str(exc or "")
-                if ("ERROR_SERVER_ERROR" in err or "SERVER_ERROR" in err) and attempt < total_attempts:
-                    log(f"[PayPal] CaptchaAI 服务器错误，自动重试 ({attempt}/{total_attempts - 1})")
-                    await page.wait_for_timeout(2500)
-                    continue
-                raise
-    except Exception as exc:
-        log(f"[PayPal] CaptchaAI 解题失败: {exc}")
-        await _wait_captcha_manual(page)
-        return
-
-    if not token:
-        log("[PayPal] CaptchaAI 未返回 token，回退到手动模式")
-        await _wait_captcha_manual(page)
-        return
-
-    log("[PayPal] CaptchaAI 已解决验证码，注入 token...")
-    if provider == "hcaptcha":
-        await _inject_hcaptcha_token(page, token)
-    else:
-        await _inject_recaptcha_token(page, token)
-    await _post_captcha_nudge(page)
-    await page.wait_for_timeout(3000)
-    cleared = await _wait_captcha_cleared(page, timeout_seconds=45)
-    if cleared:
-        log("[PayPal] 验证码 token 已注入，页面已通过/进入下一步")
-    else:
-        if version == "v3":
-            log("[PayPal] v3 token 未通过，尝试按 v2 再求解一次...")
-            info2 = await _extract_captcha_info(page)
-            provider2 = info2.get("provider", "unknown")
-            site_key2 = info2.get("siteKey", "")
-            page_url2 = info2.get("pageurl") or page.url
-            data_s2 = info2.get("dataS") or ""
-            invisible2 = info2.get("invisible") == "1"
-            enterprise2 = info2.get("enterprise") == "1"
-            if provider2 == "recaptcha" and site_key2:
-                try:
-                    token2 = await asyncio.to_thread(
-                        rs.solve_recaptcha_v2,
-                        api_key, site_key2, page_url2, invisible2, enterprise2, 180, 20, 5, data_s2, proxy_for_solver, proxy_type
-                    )
-                    if token2:
-                        log("[PayPal] v2 补解成功，重新注入 token...")
-                        await _inject_recaptcha_token(page, token2)
-                        await _post_captcha_nudge(page)
-                        await page.wait_for_timeout(3000)
-                        if await _wait_captcha_cleared(page, timeout_seconds=45):
-                            log("[PayPal] v2 补解后验证码已通过")
-                            return
-                except Exception as exc:
-                    log(f"[PayPal] v2 补解失败: {exc}")
-        # 官方文档常见问题：pageurl 不匹配会导致 token 注入后仍被拒绝
-        # 这里再用“当前父页面 URL”补试一次 v2 求解。
-        try:
-            parent_url = page.url
-            if parent_url and parent_url != page_url:
-                log("[PayPal] 尝试切换 pageurl=父页面 重新按 v2 求解...")
-                token3 = await asyncio.to_thread(
-                    rs.solve_recaptcha_v2,
-                    api_key, site_key, parent_url, invisible, enterprise, 180, 20, 5, data_s, proxy_for_solver, proxy_type
-                )
-                if token3:
-                    log("[PayPal] 父页面 pageurl 补解成功，重新注入 token...")
-                    await _inject_recaptcha_token(page, token3)
-                    await _post_captcha_nudge(page)
-                    await page.wait_for_timeout(3000)
-                    if await _wait_captcha_cleared(page, timeout_seconds=45):
-                        log("[PayPal] 父页面 pageurl 补解后验证码已通过")
-                        return
-        except Exception as exc:
-            log(f"[PayPal] 父页面 pageurl 补解失败: {exc}")
-        log("[PayPal] 验证码 token 已注入，但挑战仍存在，回退手动处理")
-        await _wait_captcha_manual(page)
-
-
-async def _solve_with_capsolver(page, api_key: str) -> None:
-    """使用 CapSolver 解决验证码（支持 reCAPTCHA v2/v3）。"""
-    import httpx
-
-    log("[PayPal] 使用 CapSolver 打码平台...")
-    captcha_info = await _extract_captcha_info(page)
-    provider = captcha_info.get("provider", "unknown")
-    version = captcha_info.get("version", "v2")
-    enterprise = captcha_info.get("enterprise") == "1"
-    site_key = captcha_info.get("siteKey", "")
-    page_url = captcha_info.get("pageurl") or page.url
-    action = captcha_info.get("action") or "verify"
-
-    if not site_key or provider == "unknown":
-        log("[PayPal] 无法提取验证码 siteKey，回退到手动模式")
-        await _wait_captcha_manual(page)
-        return
-
-    if provider == "hcaptcha":
-        captcha_type = "HCaptchaTaskProxyLess"
-    elif version == "v3":
-        captcha_type = "ReCaptchaV3TaskProxyLess"
-    else:
-        captcha_type = "ReCaptchaV2TaskProxyLess"
-
-    log(f"[PayPal] 本地求解参数: provider={provider} enterprise={enterprise} sitekey={site_key[:20]}... pageurl={str(page_url)[:120]}")
-    log(f"[PayPal] 验证码类型: {captcha_type}, siteKey: {site_key[:20]}...")
-
-    task: dict[str, Any] = {
-        "type": captcha_type,
-        "websiteURL": page_url,
-        "websiteKey": site_key,
-    }
-    if captcha_type.startswith("ReCaptcha"):
-        task["isEnterprise"] = enterprise
-    if captcha_type == "ReCaptchaV3TaskProxyLess":
-        min_score = 0.3
-        try:
-            min_score = float((load_env(".env").get("PAYPAL_CAPTCHA_V3_MIN_SCORE") or "0.3").strip() or "0.3")
-        except Exception:
-            min_score = 0.3
-        task["pageAction"] = action or "verify"
-        task["minScore"] = min_score
-
-    create_payload = {"clientKey": api_key, "task": task}
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post("https://api.capsolver.com/createTask", json=create_payload)
-        result = resp.json()
-
-    if result.get("errorId"):
-        log(f"[PayPal] CapSolver 创建任务失败: {result.get('errorDescription', result)}")
-        await _wait_captcha_manual(page)
-        return
-
-    task_id = result.get("taskId")
-    if not task_id:
-        log(f"[PayPal] CapSolver 未返回 taskId: {result}")
-        await _wait_captcha_manual(page)
-        return
-
-    log(f"[PayPal] CapSolver 任务已创建: {task_id}，等待解决...")
-
-    for _ in range(60):
-        await page.wait_for_timeout(3000)
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.capsolver.com/getTaskResult",
-                json={"clientKey": api_key, "taskId": task_id},
-            )
-            result = resp.json()
-
-        status = result.get("status", "")
-        if status == "ready":
-            solution = result.get("solution", {})
-            token = solution.get("gRecaptchaResponse") or solution.get("token") or ""
-            if not token:
-                log(f"[PayPal] CapSolver 返回 ready 但无 token: {result}")
-                await _wait_captcha_manual(page)
-                return
-
-            log("[PayPal] CapSolver 已解决验证码，注入 token...")
-            if "ReCaptcha" in captcha_type:
-                await _inject_recaptcha_token(page, token)
-            else:
-                await page.evaluate("""(token) => {
-                    const ta = document.querySelector('[name="h-captcha-response"], textarea[name="g-recaptcha-response"]');
-                    if (ta) ta.value = token;
-                    if (window.hcaptcha) {
-                        try { window.hcaptcha.execute(); } catch {}
-                    }
-                }""", token)
-            await page.wait_for_timeout(3000)
-            cleared = await _wait_captcha_cleared(page, timeout_seconds=45)
-            if cleared:
-                log("[PayPal] 验证码 token 已注入，页面已通过/进入下一步")
-            else:
-                log("[PayPal] 验证码 token 已注入，但挑战仍存在，回退手动处理")
-                await _wait_captcha_manual(page)
-            return
-
-        if status == "failed":
-            log(f"[PayPal] CapSolver 解题失败: {result.get('errorDescription', '')}")
-            await _wait_captcha_manual(page)
-            return
-
-    log("[PayPal] CapSolver 等待超时（180s），回退到手动模式")
+    """兼容旧调用：打码平台逻辑已移除，只保留人工处理。"""
+    await _cleanup_hosted_captcha_artifacts(page, timeout_ms=15000)
     await _wait_captcha_manual(page)
-async def _solve_with_twocaptcha(page, api_key: str) -> None:
-    """使用 2Captcha 解决验证码（支持 reCAPTCHA v2/v3）。"""
-    import httpx
 
-    log("[PayPal] 使用 2Captcha 打码平台...")
-
-    captcha_info = await _extract_captcha_info(page)
-    provider = captcha_info.get("provider", "unknown")
-    version = captcha_info.get("version", "v2")
-    enterprise = captcha_info.get("enterprise") == "1"
-    site_key = captcha_info.get("siteKey", "")
-    page_url = captcha_info.get("pageurl") or page.url
-    action = captcha_info.get("action") or "verify"
-
-    if not site_key or provider != "recaptcha":
-        log("[PayPal] 无法提取 reCAPTCHA siteKey，回退到手动模式")
-        await _wait_captcha_manual(page)
-        return
-
-    log(f"[PayPal] 本地求解参数: provider=recaptcha enterprise={enterprise} sitekey={site_key[:20]}... pageurl={str(page_url)[:120]}")
-
-    submit_params = {
-        "key": api_key,
-        "method": "userrecaptcha",
-        "googlekey": site_key,
-        "pageurl": page_url,
-        "json": 1,
-    }
-    if enterprise:
-        submit_params["enterprise"] = 1
-    if version == "v3":
-        submit_params["version"] = "v3"
-        submit_params["action"] = action or "verify"
-        submit_params["min_score"] = (load_env(".env").get("PAYPAL_CAPTCHA_V3_MIN_SCORE") or "0.3").strip() or "0.3"
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get("https://2captcha.com/in.php", params=submit_params)
-        result = resp.json()
-
-    if result.get("status") != 1:
-        log(f"[PayPal] 2Captcha 提交失败: {result}")
-        await _wait_captcha_manual(page)
-        return
-
-    request_id = result.get("request")
-    log(f"[PayPal] 2Captcha 任务已提交: {request_id}，等待解决...")
-
-    for _ in range(40):
-        await page.wait_for_timeout(5000)
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get("https://2captcha.com/res.php", params={
-                "key": api_key,
-                "action": "get",
-                "id": request_id,
-                "json": 1,
-            })
-            result = resp.json()
-
-        if result.get("status") == 1:
-            token = result.get("request", "")
-            log("[PayPal] 2Captcha 已解决验证码，注入 token...")
-            await _inject_recaptcha_token(page, token)
-            await page.wait_for_timeout(3000)
-            cleared = await _wait_captcha_cleared(page, timeout_seconds=45)
-            if cleared:
-                log("[PayPal] 验证码 token 已注入，页面已通过/进入下一步")
-            else:
-                log("[PayPal] 验证码 token 已注入，但挑战仍存在，回退手动处理")
-                await _wait_captcha_manual(page)
-            return
-
-        if "CAPCHA_NOT_READY" not in str(result.get("request", "")):
-            log(f"[PayPal] 2Captcha 失败: {result}")
-            await _wait_captcha_manual(page)
-            return
-
-    log("[PayPal] 2Captcha 等待超时，回退到手动模式")
-    await _wait_captcha_manual(page)
 async def fill_sms_code(
     page,
     api_url: str,
@@ -3657,4 +3432,5 @@ async def run_paypal_pay(
     await asyncio.gather(*tasks)
     log(f"PayPal 流程2 完成：成功 {success}/{target}")
     return success
+
 
